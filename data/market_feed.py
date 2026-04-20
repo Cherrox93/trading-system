@@ -241,7 +241,9 @@ async def discover_markets() -> dict:
 
     min_vol = settings.MIN_VOLUME_USD
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=30.0, read=20.0, write=10.0, pool=5.0)
+    ) as client:
         r_ob, r_st = await asyncio.gather(
             client.get(f"{API_BASE}/api/v1/orderBooks"),
             client.get(f"{API_BASE}/api/v1/exchangeStats"),
@@ -249,8 +251,8 @@ async def discover_markets() -> dict:
         r_ob.raise_for_status()
         r_st.raise_for_status()
 
-    ob_data  = r_ob.json()
-    st_data  = r_st.json()
+    ob_data = r_ob.json()
+    st_data = r_st.json()
 
     # lighter_symbol → market_id
     sym_to_id: dict[str, int] = {}
@@ -343,49 +345,56 @@ async def fetch_historical_candles(
 ) -> int:
     """
     Pobierz historyczne świece przez REST.
-    Wywoływane raz przy starcie, potem co CANDLE_POLL_INTERVAL[res].
-    Zwraca liczbę załadowanych świec. Ponawia przy 429 (max 3 razy).
-    Przyjmuje opcjonalny współdzielony client (szybsze połączenia keepalive).
+    Zwraca liczbę załadowanych świec lub 0 przy błędzie.
+    Przy 429 ponawia z wykładniczym backoffem.
     """
-    limit = CANDLE_LIMIT[resolution]
-    now_ms = int(time.time() * 1000)
+    limit    = CANDLE_LIMIT[resolution]
+    now_ms   = int(time.time() * 1000)
     start_ms = now_ms - CANDLE_LOOKBACK_MS[resolution]
-    _own_client = client is None
+    params   = {
+        "market_id":       market_id,
+        "resolution":      resolution,
+        "start_timestamp": start_ms,
+        "end_timestamp":   now_ms,
+        "count_back":      limit,
+    }
 
-    for attempt in range(_retries):
-        try:
-            if _own_client:
-                client = httpx.AsyncClient(timeout=15)
-            async with (client if _own_client else contextlib.nullcontext(client)) as c:
-                resp = await c.get(
-                    f"{API_BASE}/api/v1/candles",
-                    params={
-                        "market_id":       market_id,
-                        "resolution":      resolution,
-                        "start_timestamp": start_ms,
-                        "end_timestamp":   now_ms,
-                        "count_back":      limit,
-                    }
-                )
+    # Używamy zewnętrznego klienta lub tworzymy jednorazowy
+    _own_client = client is None
+    if _own_client:
+        client = httpx.AsyncClient(timeout=12)
+
+    try:
+        for attempt in range(_retries):
+            try:
+                resp = await client.get(f"{API_BASE}/api/v1/candles", params=params)
+
                 if resp.status_code == 429:
                     wait = _backoff_base * (2 ** attempt)
-                    logger.debug(f"429 {symbol}/{resolution} — retry za {wait}s")
+                    logger.debug(f"429 {symbol}/{resolution} — retry za {wait:.0f}s")
                     await asyncio.sleep(wait)
                     continue
-                resp.raise_for_status()
+
+                if resp.status_code != 200:
+                    logger.debug(f"Swiecze {symbol}/{resolution}: HTTP {resp.status_code}")
+                    return 0
+
                 return _parse_candles_response(resp.json(), symbol, resolution)
 
-        except httpx.HTTPStatusError:
-            raise
-        except Exception as e:
-            logger.warning(f"Blad historycznych swiec {symbol}/{resolution}: {e}")
-            return 0
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+                logger.debug(f"Swiecze {symbol}/{resolution}: {type(e).__name__} — pomijam")
+                return 0
+            except asyncio.CancelledError:
+                return 0
+            except Exception as e:
+                logger.debug(f"Swiecze {symbol}/{resolution}: {type(e).__name__}: {e}")
+                return 0
 
-    logger.warning(
-        f"Blad historycznych swiec {symbol}/{resolution}: "
-        f"wyczerpano {_retries} prob (429)"
-    )
-    return 0
+        logger.debug(f"Swiecze {symbol}/{resolution}: wyczerpano {_retries} prób (429)")
+        return 0
+    finally:
+        if _own_client:
+            await client.aclose()
 
 
 async def fetch_exchange_stats() -> None:
@@ -906,37 +915,23 @@ def get_token_data(token: str) -> Optional[dict]:
 
 
 def get_all_tokens() -> list:
-    """Synchroniczny dostęp do wszystkich tokenów — z state jeśli załadowany, fallback plik."""
-    if state.markets:
-        tokens = []
-        for symbol in list(state.markets.keys()):
-            if symbol in TOKEN_BLACKLIST:
-                continue
-            price = state.last_price.get(symbol, 0.0)
-            if price == 0.0:
-                continue
-            inds = calc_indicators(symbol)
-            st   = state.stats.get(symbol, {"change_24h": 0.0, "volume_24h": 0.0})
-            # Licz change_24h z 1d candle (jak write_snapshot)
-            change_24h = st.get("change_24h", 0.0)
-            candles_1d = list(state.candles[symbol].get("1d", []))
-            if candles_1d and price > 0:
-                open_1d = float(candles_1d[-1]["o"])
-                if open_1d > 0:
-                    change_24h = round((price - open_1d) / open_1d * 100, 2)
-            tokens.append({
-                "symbol":     symbol,
-                "price":      price,
-                "change_24h": change_24h,
-                "volume_24h": st.get("volume_24h", 0.0),
-                "indicators": inds,
-            })
-        return tokens
+    """Zwraca tokeny ze snapshot — wskaźniki przeliczone przez write_snapshot w tle."""
     try:
         snap = json.loads(SNAPSHOT_PATH.read_text())
-        return snap.get("tokens", [])
+        tokens = snap.get("tokens", [])
+        if tokens:
+            return tokens
     except Exception:
-        return []
+        pass
+    # Fallback: same prices bez wskaźników (snapshot jeszcze nie gotowy)
+    if state.markets:
+        return [
+            {"symbol": sym, "price": state.last_price.get(sym, 0.0),
+             "change_24h": 0.0, "volume_24h": 0.0, "indicators": {}}
+            for sym in state.markets
+            if state.last_price.get(sym, 0.0) > 0
+        ]
+    return []
 
 
 def get_current_price(token: str) -> float:
@@ -983,31 +978,29 @@ async def run():
         lighter_sym = LIGHTER_SYMBOL.get(our_sym, our_sym)
         state.init_token(our_sym, market_id, lighter_sym)
 
-    # 3. Załaduj dane historyczne (REST) — sekwencyjnie, 0.3s między requestami
+    # 3. Załaduj dane historyczne — per resolution, semaphore(3), 2s między TF
     n_req = len(market_ids) * len(RESOLUTIONS)
-    logger.info(f"Laduje dane historyczne przez REST ({n_req} zapytan, sekwencyjnie)...")
-    all_tasks = [
-        (symbol, mid, res)
-        for symbol, mid in market_ids.items()
-        for res in RESOLUTIONS
-    ]
-    REQUEST_TIMEOUT = 15
+    logger.info(f"Laduje dane historyczne ({n_req} zapytan)...")
     counts: list[int] = []
+    _sem = asyncio.Semaphore(3)
+
+    async def _fetch(sym, mid, res, client):
+        async with _sem:
+            return await fetch_historical_candles(
+                sym, mid, res, _retries=2, _backoff_base=3.0, client=client,
+            )
+
     async with httpx.AsyncClient(
-        timeout=REQUEST_TIMEOUT,
-        limits=httpx.Limits(max_connections=5, max_keepalive_connections=3),
+        timeout=12,
+        limits=httpx.Limits(max_connections=4, max_keepalive_connections=3),
     ) as shared_client:
-        for idx, (sym, mid, res) in enumerate(all_tasks):
-            try:
-                n = await asyncio.wait_for(
-                    fetch_historical_candles(sym, mid, res, client=shared_client),
-                    timeout=REQUEST_TIMEOUT + 5,
-                )
-                counts.append(n)
-            except Exception:
-                counts.append(0)
-            if idx < len(all_tasks) - 1:
-                await asyncio.sleep(0.3)
+        for res in RESOLUTIONS:
+            tasks = [_fetch(sym, mid, res, shared_client)
+                     for sym, mid in market_ids.items()]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            counts.extend(r if isinstance(r, int) else 0 for r in results)
+            logger.info(f"  {res}: zaladowano {sum(r for r in results if isinstance(r, int))} swiec")
+            await asyncio.sleep(2)
 
     total = sum(counts)
     logger.info(
