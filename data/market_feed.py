@@ -97,7 +97,7 @@ TOKEN_BLACKLIST: set[str] = {
 
 # Timeframy: klucz wewnętrzny → parametr API
 # Lighter używa: 1m, 5m, 15m, 30m, 1h, 4h, 1d
-RESOLUTIONS: list[str] = ["1m", "5m", "15m", "1h", "4h", "1d"]
+RESOLUTIONS: list[str] = ["1m", "5m", "15m", "4h", "1d"]
 
 # Ile świec pobieramy historycznie dla każdego TF
 CANDLE_LIMIT = {
@@ -676,10 +676,9 @@ def write_snapshot():
             # Funding
             "funding_rate": fund["rate"],
 
-            # Świece wszystkich timeframów
+            # Tylko ostatnie 25 świec 1m (potrzebne przez signal_scanner do volume spike)
             "candles": {
-                res: list(state.candles[symbol][res])
-                for res in RESOLUTIONS
+                "1m": list(state.candles[symbol]["1m"])[-25:],
             },
 
             # Wskaźniki wyliczone lokalnie
@@ -787,11 +786,12 @@ async def candle_poll_loop(market_ids: dict):
 
 
 async def snapshot_writer_loop():
-    """Zapisuj snapshot co 5 sekund niezależnie od WS i pollingu."""
+    """Zapisuj snapshot co 5 sekund — w osobnym wątku, nie blokuje event loop."""
+    loop = asyncio.get_event_loop()
     while True:
         await asyncio.sleep(5)
         try:
-            write_snapshot()
+            await loop.run_in_executor(None, write_snapshot)
         except Exception:
             pass
 

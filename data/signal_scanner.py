@@ -670,7 +670,7 @@ Odpowiedz WYŁĄCZNIE JSON:
                 now = time.time()
 
                 from data.market_feed import get_all_tokens
-                tokens = get_all_tokens()
+                tokens = await asyncio.get_event_loop().run_in_executor(None, get_all_tokens)
 
                 if not tokens:
                     await asyncio.sleep(FAST_SCAN_INTERVAL)
