@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # ── Interwały ──────────────────────────────────────────────
 TRADER_SCAN_INTERVAL     = 30
-TRADER_POSITION_INTERVAL = 60
+TRADER_POSITION_INTERVAL = 15
 SUPERVISOR_QUICK         = 6 * 3600
 SUPERVISOR_FULL          = 24 * 3600
 
@@ -78,7 +78,7 @@ async def _llm_call(prompt: str, max_tokens: int = 1000) -> str:
             model=model,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=max_tokens,
-            temperature=0.2,
+            temperature=0.5,
         )
         return resp.choices[0].message.content.strip()
 
@@ -284,34 +284,99 @@ async def _trader_beat(agent_id: str) -> bool:
 
     if open_trades:
         # Ma otwartą pozycję — monitoruj
-        trade = open_trades[0]
+        trade      = open_trades[0]
         token_snap = _get_token_snapshot(trade["token"])
-        price_info = ""
+
+        # Czas w pozycji i unrealized PnL
+        from datetime import datetime, timezone as _tz
+        time_in_pos = ""
+        unrealized  = ""
+        try:
+            ts_str = trade.get("timestamp", "")
+            if ts_str:
+                ts   = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_tz.utc)
+                mins = int((datetime.now(_tz.utc) - ts).total_seconds() / 60)
+                time_in_pos = f"{mins//60}h {mins%60}m" if mins >= 60 else f"{mins}m"
+        except Exception:
+            pass
+
+        cur_price = 0.0
         if token_snap:
-            price_info = (
-                f"Current price: ${token_snap['price']:.6f} | "
-                f"Change 24h: {token_snap['change_24h']:.2f}%"
-            )
+            cur_price = float(token_snap.get("price") or 0)
+        if cur_price and trade.get("entry_price"):
+            ep  = float(trade["entry_price"])
+            lev = float(trade.get("leverage") or 1)
+            sz  = float(trade.get("size_usdt") or 0)
+            if trade["direction"] == "long":
+                upnl = (cur_price - ep) / ep * sz * lev
+            else:
+                upnl = (ep - cur_price) / ep * sz * lev
+            unrealized = f"Unrealized PnL: {'+' if upnl >= 0 else ''}{upnl:.4f}$"
+
+        # Top sygnały dostępne (dla oceny czy warto wyjść wcześniej)
+        alt_signals = _load_signals()[:3]
+        alt_txt = ""
+        for s in alt_signals:
+            if s.get("symbol") != trade["token"]:
+                alt_txt += (
+                    f"\n  {s['symbol']} {s.get('direction','?').upper()} "
+                    f"[{s.get('signal_type','?')}] conf={int(s.get('confidence',0)*100)}%"
+                )
+        alt_section = f"\nAVAILABLE SIGNALS (other opportunities):{alt_txt}" if alt_txt else ""
+
+        sl_hit = cur_price and (
+            (trade['direction'] == 'long'  and cur_price <= float(trade.get('sl_price') or 0)) or
+            (trade['direction'] == 'short' and cur_price >= float(trade.get('sl_price') or 0))
+        )
+        tp_hit = cur_price and (
+            (trade['direction'] == 'long'  and cur_price >= float(trade.get('tp_price') or 0)) or
+            (trade['direction'] == 'short' and cur_price <= float(trade.get('tp_price') or 0))
+        )
+        alert = ""
+        if sl_hit:
+            alert = "\n!! SL BREACHED — close immediately to limit losses !!"
+        elif tp_hit:
+            alert = "\n!! TP REACHED — take profit now !!"
 
         prompt = f"""You are trader agent {agent_id} ({personality} personality).
-You have an OPEN POSITION:
-  Token: {trade['token']} | Direction: {trade['direction']}
-  Entry: ${trade.get('entry_price', '?')} | Size: ${trade.get('size_usdt', '?')}
-  SL: {trade.get('sl_pct', '?')}% | TP: {trade.get('tp_pct', '?')}%
-  Trade ID: {trade['id']}
-{price_info}
-{corrections_txt}
-Budget: ${budget:.2f} | Available: ${available:.2f}
 
-Analyze the current market conditions for {trade['token']} and decide: HOLD or CLOSE.
-Close only if: strong reversal signal, SL likely to be hit soon, or better opportunity exists.
+OPEN POSITION:
+  Token: {trade['token']} | Direction: {trade['direction'].upper()}
+  Entry: ${trade.get('entry_price','?')} | Size: ${trade.get('size_usdt','?')} x{trade.get('leverage',1)}
+  SL: ${trade.get('sl_price','?')} | TP: ${trade.get('tp_price','?')}
+  Current price: ${cur_price or '?'} | {unrealized}
+  Time in position: {time_in_pos or '?'}
+  Trade ID: {trade['id']}
+{alert}{corrections_txt}{alt_section}
+
+YOU control this position — there is no automatic SL/TP. You must close it yourself.
+
+DECISIONS AVAILABLE:
+- "hold"          — stay, nothing to do
+- "close"         — exit now at market price
+- "adjust_sl"     — move SL (only tighten toward entry / breakeven, never widen)
+- "adjust_tp"     — extend TP further in profit direction when momentum is strong
+- "close_partial" — close 50% now to lock partial profit, keep 50% running
+
+Rules:
+- ALWAYS close if current price has reached or passed SL or TP
+- Close early: position > 2h with < 0.1% move, OR strong reversal, OR better signal conf >= 10% higher
+- Partial close: in profit but uncertain — locks gains while staying exposed
+- Adjust SL: after solid move in your favour, trail to breakeven
+- Adjust TP: momentum accelerating — let winners run
 
 Respond with valid JSON only:
 {{
-  "decision": "hold" or "close",
+  "decision": "hold" | "close" | "adjust_sl" | "adjust_tp" | "close_partial",
+  "new_sl_price": 0.0,
+  "new_tp_price": 0.0,
+  "close_pct": 0.5,
   "reasoning": "max 60 words",
   "trade_id": {trade['id']}
-}}"""
+}}
+(include only relevant fields)"""
 
     else:
         # Brak pozycji — szukaj setupu
@@ -373,10 +438,13 @@ You are free to use any approach that fits the market conditions — you are not
 Use your trading identity and past experience to judge each signal.
 If similar setups previously failed, lower confidence or skip.
 Select ONE to enter, or skip if nothing fits.
-You decide: leverage (1-50x), position size (% of budget), SL and TP.
-Use the indicators (RSI, ATR, pivots) to set precise SL/TP levels.
-IMPORTANT: always set sl_pct=0.004 (0.4%) and tp_pct=0.006 (0.6%) — fixed R:R learning phase.
-Only enter if confidence >= 65%.
+
+POSITION RULES:
+- You decide leverage: x1-x50. Use x1-x3 for weak/unclear setups, x5-x15 for solid setups,
+  x20+ only for very high conviction with tight SL. Match leverage to certainty.
+- You decide SL and TP: use ATR and pivot points (S1/R1) to place them at natural levels.
+  Minimum SL: 0.3%, minimum TP: 0.5%
+- Only enter if confidence >= 55%.
 
 Respond with valid JSON only:
 {{
@@ -384,19 +452,14 @@ Respond with valid JSON only:
   "reasoning": "max 60 words",
   "token": "BTC",
   "direction": "long" or "short",
-  "size_pct": 0.3,
-  "leverage": 5,
-  "sl_pct": 0.004,
-  "tp_pct": 0.006,
+  "size_pct": 0.1,
+  "leverage": 3,
+  "sl_pct": 0.008,
+  "tp_pct": 0.015,
   "strategy": "strategy_name",
-  "confidence": 0.75
+  "confidence": 0.70
 }}
-Position sizing based on confidence:
-  confidence < 0.70  → size_pct = 0.10  (10% of budget)
-  confidence 0.70–0.79 → size_pct = 0.20  (20% of budget)
-  confidence 0.80–0.89 → size_pct = 0.35  (35% of budget)
-  confidence >= 0.90   → size_pct = 0.50  (50% of budget)
-Do NOT enter if confidence < 0.65."""
+Do NOT enter if confidence < 0.55."""
 
     try:
         raw    = await asyncio.wait_for(_llm_call(prompt, max_tokens=400), timeout=TRADER_LLM_TIMEOUT)
@@ -421,17 +484,21 @@ Do NOT enter if confidence < 0.65."""
         strategy  = result.get("strategy", "unknown")
         confidence = float(result.get("confidence", 0.5))
 
-        sl_pct = 0.004  # enforce SL 0.4%
-        tp_pct = 0.006  # enforce TP 0.6% (R:R 1.5:1)
-        if confidence >= 0.90:
-            size_pct = 0.50
-        elif confidence >= 0.80:
-            size_pct = 0.35
-        elif confidence >= 0.70:
-            size_pct = 0.20
-        else:
-            size_pct = 0.10
-        if token and direction and sl_pct >= 0.001:
+        sl_pct = max(sl_pct, 0.003)   # minimum SL 0.3%
+        tp_pct = max(tp_pct, 0.005)   # minimum TP 0.5%
+        if token and direction and confidence >= 0.55 and sl_pct >= 0.003:
+            # Blokada: 1 token = max 1 agent
+            from database.db import get_connection as _gc
+            with _gc() as _conn:
+                _tok_busy = _conn.execute(
+                    "SELECT COUNT(*) FROM trades WHERE token=? AND status='open' AND agent_id!=?",
+                    (token.upper(), agent_id),
+                ).fetchone()[0]
+            if _tok_busy:
+                logger.info(f"Trader {agent_id}: {token} zajęty przez innego agenta — skip")
+                log_activity(agent_id, f"SKIP: {token} zajęty przez innego agenta", "info")
+                return True
+
             size_usdt = budget * size_pct
             if size_usdt <= available:
                 from execution.trade_executor import execute_trade
@@ -470,35 +537,72 @@ Do NOT enter if confidence < 0.65."""
                 logger.info(f"Trader {agent_id}: za mały budżet na {token} (${size_usdt:.2f} > ${available:.2f})")
 
     elif decision == "close" and open_trades:
-        trade_id = result.get("trade_id", open_trades[0]["id"])
+        orig     = open_trades[0]
+        trade_id = result.get("trade_id", orig["id"])
         from execution.trade_executor import close_trade
         close_result = close_trade(trade_id, None, reasoning)
         if close_result.get("success"):
-            logger.info(f"Trader {agent_id}: CLOSE trade {trade_id} — {reasoning[:60]}")
-            orig = open_trades[0]
-            closed_trade = {
-                "token":       orig.get("token", "?"),
-                "direction":   orig.get("direction", "?"),
-                "pnl_usdt":    close_result.get("pnl_usdt", 0),
-                "exit_price":  close_result.get("exit_price", "?"),
-                "exit_reason": reasoning[:100],
-            }
+            logger.info(f"Trader {agent_id}: CLOSE {trade_id} — {reasoning[:60]}")
             try:
                 from telegram.reporter import send_trade_alert
-                await send_trade_alert(agent_id, closed_trade, "close")
+                await send_trade_alert(agent_id, {
+                    "token":       orig.get("token", "?"),
+                    "direction":   orig.get("direction", "?"),
+                    "pnl_usdt":    close_result.get("pnl_usdt", 0),
+                    "exit_price":  close_result.get("exit_price", "?"),
+                    "exit_reason": reasoning[:100],
+                }, "close")
             except Exception as _te:
                 logger.debug(f"Telegram trade alert error: {_te}")
-
-            # Zapisz do dziennika agenta (nieblokująco)
-            journal_trade = {
+            asyncio.create_task(_write_journal_entry(agent_id, {
                 **dict(orig),
-                "pnl_usdt":  close_result.get("pnl_usdt", 0),
+                "pnl_usdt":   close_result.get("pnl_usdt", 0),
                 "exit_price": close_result.get("exit_price"),
-                "status":    "closed",
-            }
-            asyncio.create_task(_write_journal_entry(agent_id, journal_trade, reasoning))
+                "status":     "closed",
+            }, reasoning))
         else:
             logger.warning(f"Trader {agent_id}: close FAIL — {close_result.get('message')}")
+
+    elif decision == "adjust_sl" and open_trades:
+        new_sl = float(result.get("new_sl_price") or 0)
+        if new_sl > 0:
+            from execution.trade_executor import modify_trade
+            r = modify_trade(open_trades[0]["id"], sl_price=new_sl)
+            if r.get("success"):
+                logger.info(f"Trader {agent_id}: ADJUST_SL → {new_sl:.6f} | {reasoning[:60]}")
+                log_activity(agent_id, f"ADJUST_SL: {new_sl:.6f} | {reasoning}", "info")
+            else:
+                logger.warning(f"Trader {agent_id}: adjust_sl FAIL — {r.get('message')}")
+
+    elif decision == "adjust_tp" and open_trades:
+        new_tp = float(result.get("new_tp_price") or 0)
+        if new_tp > 0:
+            from execution.trade_executor import modify_trade
+            r = modify_trade(open_trades[0]["id"], tp_price=new_tp)
+            if r.get("success"):
+                logger.info(f"Trader {agent_id}: ADJUST_TP → {new_tp:.6f} | {reasoning[:60]}")
+                log_activity(agent_id, f"ADJUST_TP: {new_tp:.6f} | {reasoning}", "info")
+            else:
+                logger.warning(f"Trader {agent_id}: adjust_tp FAIL — {r.get('message')}")
+
+    elif decision == "close_partial" and open_trades:
+        orig      = open_trades[0]
+        close_pct = float(result.get("close_pct") or 0.5)
+        from execution.trade_executor import partial_close_trade
+        pc_result = partial_close_trade(orig["id"], close_pct, None, reasoning)
+        if pc_result.get("success"):
+            logger.info(
+                f"Trader {agent_id}: PARTIAL_CLOSE {int(close_pct*100)}% "
+                f"PnL={pc_result.get('pnl_usdt',0):+.4f}$ — {reasoning[:50]}"
+            )
+            log_activity(
+                agent_id,
+                f"PARTIAL_CLOSE {int(close_pct*100)}%: PnL={pc_result.get('pnl_usdt',0):+.4f}$ "
+                f"| pozostało ${pc_result.get('remaining_size',0):.4f} | {reasoning}",
+                "info",
+            )
+        else:
+            logger.warning(f"Trader {agent_id}: partial_close FAIL — {pc_result.get('message')}")
 
     else:
         logger.info(f"Trader {agent_id}: {decision.upper()} — {reasoning[:80]}")

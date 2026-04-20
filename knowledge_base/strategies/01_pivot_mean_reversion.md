@@ -92,3 +92,10 @@ TP: PP = 1.2400 (R/R = 1:2.2 ✓)
 - `volume_multiplier`: minimum volume vs average (default 1.2)
 - `sl_buffer_pct`: buffer behind S/R level (default 0.4%)
 - `tp_partial_pct`: % toward TP for partial close (default 50%)
+
+## FIELD EXPERIENCE
+Last updated: 2026-04-20
+Trades analyzed: 17 (wins: 10, losses: 7)
+Actual Win Rate: 58.8%
+Average PnL per trade: +0.0488 USDT
+Status: PERFORMING — above expected WR

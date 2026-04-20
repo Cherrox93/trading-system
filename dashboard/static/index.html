@@ -456,6 +456,52 @@ select{
   .page{padding:12px}
 }
 
+/* ── Ranking ── */
+.rank-row{
+  display:grid;
+  grid-template-columns:44px 1fr 160px 120px 100px 100px 90px;
+  align-items:center;
+  gap:0 16px;
+  padding:14px 16px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  margin-bottom:8px;
+  transition:border-color .15s,box-shadow .15s;
+  position:relative;
+  overflow:hidden;
+}
+.rank-row::before{
+  content:'';
+  position:absolute;top:0;left:0;bottom:0;width:3px;
+  background:var(--rk-ac,var(--border));
+}
+.rank-row:hover{border-color:var(--rk-ac,var(--border2));box-shadow:0 2px 16px color-mix(in srgb,var(--rk-ac,#000) 15%,transparent)}
+.rank-pos{
+  font-size:18px;font-weight:800;
+  color:var(--text3);
+  text-align:center;
+  font-variant-numeric:tabular-nums;
+  line-height:1;
+}
+.rank-pos.gold{color:#f5c842}
+.rank-pos.silver{color:#a8b8c8}
+.rank-pos.bronze{color:#cd8b5a}
+.rank-agent{display:flex;flex-direction:column;gap:3px}
+.rank-name{font-size:14px;font-weight:700;color:var(--rk-ac,var(--text))}
+.rank-pers{font-size:10px;color:var(--text3);letter-spacing:.3px}
+.rank-pnl{display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+.rank-pnl-val{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;font-family:'JetBrains Mono',monospace}
+.rank-pnl-bar{height:3px;border-radius:2px;margin-top:4px;transition:width .4s ease}
+.rank-stat{display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+.rank-stat-v{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text)}
+.rank-stat-l{font-size:9px;font-weight:500;color:var(--text3);letter-spacing:.6px;text-transform:uppercase}
+.rank-chip{display:inline-flex;align-items:center;gap:4px;font-size:9px;font-weight:600;padding:2px 7px;border-radius:20px;letter-spacing:.4px;text-transform:uppercase}
+@media(max-width:700px){
+  .rank-row{grid-template-columns:36px 1fr 120px;gap:0 10px}
+  .rank-row>*:nth-child(n+4){display:none}
+}
+
 /* ── Misc ── */
 .monospace{font-family:'JetBrains Mono',monospace}
 .text-green{color:var(--green)}
@@ -505,6 +551,7 @@ select{
 <!-- Tabs -->
 <div class="tabs">
   <button class="tab active" onclick="showTab('overview',this)">Overview</button>
+  <button class="tab" onclick="showTab('ranking',this)">Ranking</button>
   <button class="tab" onclick="showTab('trades',this)">Trades</button>
   <button class="tab" onclick="showTab('positions',this)">Positions</button>
   <button class="tab" onclick="showTab('logs',this)">Logs</button>
@@ -538,6 +585,20 @@ select{
 
   <div class="section-label">Agents</div>
   <div class="grid grid-2" id="agents-grid"></div>
+
+</div>
+
+<!-- ── RANKING ── -->
+<div id="page-ranking" class="page">
+
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+    <span class="section-label" style="margin:0;flex:1">Agent Leaderboard</span>
+    <span style="font-size:11px;color:var(--text3);display:flex;align-items:center;gap:5px">
+      <span class="ws-dot on pulse" style="width:5px;height:5px"></span>live · 2s
+    </span>
+  </div>
+
+  <div id="ranking-list"></div>
 
 </div>
 
@@ -746,6 +807,7 @@ function onSnapshot(d) {
   updHeader(d);
   updTicker(d.market || []);
   updOverview(d);
+  updRanking(d.agents || []);
   updPositions(d.positions || []);
   if (document.getElementById('log-live').checked) updLogs(d.logs || []);
   updCtrlSelects(d.agents || []);
@@ -975,6 +1037,79 @@ function updCtrlSelects(agents) {
     <td>${a.trades||0}</td>
   </tr>`;}).join('')}
   </tbody></table>`;
+}
+
+// ── Ranking tab ────────────────────────────────────────────
+function updRanking(agents) {
+  const el = document.getElementById('ranking-list');
+  if (!el) return;
+  if (!agents.length) {
+    el.innerHTML = '<div style="color:var(--text3);text-align:center;padding:48px;font-size:12px">No agents</div>';
+    return;
+  }
+
+  // Sortuj wg PnL malejąco
+  const sorted = [...agents].sort((a, b) => (b.pnl || 0) - (a.pnl || 0));
+  const maxAbsPnl = Math.max(...sorted.map(a => Math.abs(a.pnl || 0)), 0.01);
+
+  el.innerHTML = sorted.map((a, i) => {
+    const pos     = i + 1;
+    const pnl     = a.pnl || 0;
+    const wr      = a.win_rate || 0;
+    const trades  = a.trades || 0;
+    const budget  = a.budget || 0;
+    const ac      = agentColor(a.id);
+
+    const posClass = pos === 1 ? 'gold' : pos === 2 ? 'silver' : pos === 3 ? 'bronze' : '';
+    const pnlClass = pnl > 0 ? 'text-green' : pnl < 0 ? 'text-red' : 'text-muted';
+    const pnlSign  = pnl >= 0 ? '+' : '';
+    const barColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const barWidth = Math.round(Math.abs(pnl) / maxAbsPnl * 100);
+
+    const statusCls = a.status === 'active' ? 's-active' : a.status === 'paused' ? 's-paused' : 's-killed';
+
+    const hasPos = !!a.open_position;
+    const posBadge = hasPos
+      ? `<span class="rank-chip" style="background:var(--blue-dim);color:var(--blue);border:1px solid #2a4a7a;margin-top:3px">${a.open_position.token} ${(a.open_position.direction||'').toUpperCase()}</span>`
+      : '';
+
+    return `<div class="rank-row" style="--rk-ac:${ac}">
+      <div class="rank-pos ${posClass}">${pos}</div>
+
+      <div class="rank-agent">
+        <span class="rank-name">${a.id}</span>
+        <span class="rank-pers">${a.personality || ''}</span>
+        ${posBadge}
+      </div>
+
+      <div class="rank-pnl">
+        <span class="rank-pnl-val ${pnlClass}">${pnlSign}${pnl.toFixed(4)}</span>
+        <span style="font-size:9px;color:var(--text3);letter-spacing:.5px">USDT</span>
+        <div style="width:120px;height:3px;background:var(--surface3);border-radius:2px;margin-top:4px">
+          <div class="rank-pnl-bar" style="width:${barWidth}%;background:${barColor}"></div>
+        </div>
+      </div>
+
+      <div class="rank-stat">
+        <span class="rank-stat-v ${wr >= 50 ? 'text-green' : wr > 0 ? 'text-amber' : 'text-muted'}">${wr.toFixed(0)}%</span>
+        <span class="rank-stat-l">Win rate</span>
+      </div>
+
+      <div class="rank-stat">
+        <span class="rank-stat-v">${trades}</span>
+        <span class="rank-stat-l">Trades</span>
+      </div>
+
+      <div class="rank-stat">
+        <span class="rank-stat-v">$${budget.toFixed(2)}</span>
+        <span class="rank-stat-l">Budget</span>
+      </div>
+
+      <div class="rank-stat">
+        <span class="rank-chip ${statusCls}">${a.status}</span>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 // ── Trades tab ─────────────────────────────────────────────

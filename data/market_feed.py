@@ -81,18 +81,37 @@ WS_URL        = "wss://mainnet.zklighter.elliot.ai/stream"
 TOKENS: list[str] = []          # symbol → używany w całym systemie
 LIGHTER_SYMBOL: dict[str, str]= {}  # symbol → symbol na Lighter (gdy różny)
 
-# Tokeny do pominięcia — instrumenty tradfi, commodities, zduplikowane lub błędne symbole
+# Kody walut fiat — do wykrywania par forex
+_FIAT_CODES: frozenset[str] = frozenset({
+    "USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD",
+    "CNH", "CNY", "MXN", "ZAR", "SGD", "HKD", "SEK", "NOK", "DKK",
+    "TRY", "BRL", "INR", "KRW", "RUB", "PLN", "CZK", "HUF",
+})
+
+def _is_forex(symbol: str) -> bool:
+    """True jeśli symbol wygląda jak para forex (AUDUSD, EURUSD itp.)."""
+    s = symbol.upper().replace("/", "").replace("-", "")
+    if len(s) == 6 and s.isalpha():
+        return s[:3] in _FIAT_CODES and s[3:] in _FIAT_CODES
+    return False
+
+
+# Tokeny do pominięcia — instrumenty tradfi, forex, commodities, zduplikowane lub błędne symbole
 TOKEN_BLACKLIST: set[str] = {
-    "SPY",       # S&P 500 ETF tracker
-    "XAG",       # srebro (silver)
-    "XAU",       # złoto (gold)
-    "XCU",       # miedź (copper)
-    "XPT",       # platyna (platinum)
-    "WTI",       # ropa WTI (crude oil)
-    "BRENTOIL",  # ropa Brent (crude oil)
-    "AI16Z",     # token AI memów, niska jakość sygnałów
-    "LIT/USDC",  # błędny symbol ze slashem
-    "ETH/USDC",  # spot/swap — duplikat ETH, nie perpetual
+    # ETF / indeksy
+    "SPY", "QQQ", "IWM", "DIA",
+    # Surowce / metale
+    "XAG", "XAU", "XCU", "XPT", "WTI", "BRENTOIL",
+    # Forex (jawna lista — resztę łapie _is_forex)
+    "AUDUSD", "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "NZDUSD",
+    "EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "CADJPY", "CHFJPY", "AUDNZD",
+    "USDMXN", "USDZAR", "USDSGD", "USDHKD", "USDCNH",
+    # Akcje US
+    "MSFT", "META", "AAPL", "TSLA", "GOOGL", "GOOG", "AMZN", "NVDA", "AMD",
+    "COIN", "MSTR", "HOOD", "PLTR", "SMCI", "INTC", "NFLX", "DIS", "BA",
+    "JPM", "BAC", "GS", "GM", "F", "UBER", "LYFT", "SNAP", "PINS",
+    # Niska jakość / duplikaty
+    "AI16Z", "LIT/USDC", "ETH/USDC",
 }
 
 # Timeframy: klucz wewnętrzny → parametr API
@@ -286,9 +305,10 @@ async def discover_markets() -> dict:
         else:
             internal = lighter_sym
 
-        # Pomiń tokeny z czarnej listy
-        if internal in TOKEN_BLACKLIST or lighter_sym in TOKEN_BLACKLIST:
-            logger.info(f"  SKIP {internal} — na czarnej liście")
+        # Pomiń tokeny z czarnej listy i pary forex
+        if (internal in TOKEN_BLACKLIST or lighter_sym in TOKEN_BLACKLIST
+                or _is_forex(internal) or _is_forex(lighter_sym)):
+            logger.info(f"  SKIP {internal} — tradfi/forex/blacklist")
             continue
 
         market_ids[internal] = mid
@@ -761,32 +781,34 @@ async def candle_poll_loop(market_ids: dict):
     """
     Odświeżaj świece przez REST polling.
     Każdy timeframe odświeżany co swój CANDLE_POLL_INTERVAL.
-    Polling: 1 retry, backoff 1s, semaphore 4 — nie blokuje event loop.
+    Semaphore(2) + 0.15s stagger między requestami — eliminuje 429.
     """
     last_poll = {res: 0.0 for res in RESOLUTIONS}
-    _sem = asyncio.Semaphore(4)
+    _sem = asyncio.Semaphore(2)
 
-    async def _poll_one(sym: str, mid: int, res: str, client: httpx.AsyncClient):
+    async def _poll_one(sym: str, mid: int, res: str, client: httpx.AsyncClient, delay: float):
+        await asyncio.sleep(delay)
         async with _sem:
             try:
                 await fetch_historical_candles(
                     sym, mid, res,
-                    _retries=1, _backoff_base=1.0, client=client,
+                    _retries=1, _backoff_base=2.0, client=client,
                 )
             except Exception:
                 pass
 
     async with httpx.AsyncClient(
         timeout=12,
-        limits=httpx.Limits(max_connections=6, max_keepalive_connections=4),
+        limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
     ) as shared_client:
         while True:
             now = time.time()
             for res in RESOLUTIONS:
                 if now - last_poll[res] >= CANDLE_POLL_INTERVAL[res]:
+                    syms = list(market_ids.items())
                     tasks = [
-                        _poll_one(sym, mid, res, shared_client)
-                        for sym, mid in market_ids.items()
+                        _poll_one(sym, mid, res, shared_client, i * 0.15)
+                        for i, (sym, mid) in enumerate(syms)
                     ]
                     await asyncio.gather(*tasks, return_exceptions=True)
                     last_poll[res] = time.time()
@@ -978,13 +1000,14 @@ async def run():
         lighter_sym = LIGHTER_SYMBOL.get(our_sym, our_sym)
         state.init_token(our_sym, market_id, lighter_sym)
 
-    # 3. Załaduj dane historyczne — per resolution, semaphore(3), 2s między TF
+    # 3. Załaduj dane historyczne — per resolution, semaphore(2) + stagger 0.2s
     n_req = len(market_ids) * len(RESOLUTIONS)
     logger.info(f"Laduje dane historyczne ({n_req} zapytan)...")
     counts: list[int] = []
-    _sem = asyncio.Semaphore(3)
+    _sem = asyncio.Semaphore(2)
 
-    async def _fetch(sym, mid, res, client):
+    async def _fetch(sym, mid, res, client, delay: float = 0.0):
+        await asyncio.sleep(delay)
         async with _sem:
             return await fetch_historical_candles(
                 sym, mid, res, _retries=2, _backoff_base=3.0, client=client,
@@ -992,15 +1015,16 @@ async def run():
 
     async with httpx.AsyncClient(
         timeout=12,
-        limits=httpx.Limits(max_connections=4, max_keepalive_connections=3),
+        limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
     ) as shared_client:
         for res in RESOLUTIONS:
-            tasks = [_fetch(sym, mid, res, shared_client)
-                     for sym, mid in market_ids.items()]
+            syms = list(market_ids.items())
+            tasks = [_fetch(sym, mid, res, shared_client, i * 0.2)
+                     for i, (sym, mid) in enumerate(syms)]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             counts.extend(r if isinstance(r, int) else 0 for r in results)
             logger.info(f"  {res}: zaladowano {sum(r for r in results if isinstance(r, int))} swiec")
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
 
     total = sum(counts)
     logger.info(

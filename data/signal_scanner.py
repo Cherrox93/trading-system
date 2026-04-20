@@ -390,12 +390,12 @@ class SignalScanner:
         s1     = ind.get("pivot_s1")
         out    = []
 
-        # RSI extreme (< 35 lub > 65)
-        if rsi is not None and (rsi < 35 or rsi > 65):
-            confirm_4h = rsi4 is not None and (rsi4 < 40 or rsi4 > 60)
+        # RSI extreme (< 38 lub > 62 — próg obniżony o ~10% aby więcej sygnałów przechodziło)
+        if rsi is not None and (rsi < 38 or rsi > 62):
+            confirm_4h = rsi4 is not None and (rsi4 < 43 or rsi4 > 57)
             # 5m RSI w tym samym kierunku = szybsze potwierdzenie wejścia
             confirm_5m = rsi5 is not None and (
-                (rsi < 35 and rsi5 < 40) or (rsi > 65 and rsi5 > 60)
+                (rsi < 38 and rsi5 < 43) or (rsi > 62 and rsi5 > 57)
             )
             score = 3.0 + (2.0 if confirm_4h else 0.0) + (1.0 if confirm_5m else 0.0)
             out.append({
@@ -409,11 +409,11 @@ class SignalScanner:
                                 "4h_confirm": confirm_4h, "5m_confirm": confirm_5m},
             })
 
-        # RSI warning (< 42 lub > 58) — tylko jeśli nie ma extreme
-        elif rsi is not None and (rsi < 42 or rsi > 58):
-            confirm_4h = rsi4 is not None and (rsi4 < 40 or rsi4 > 60)
+        # RSI warning (< 45 lub > 55 — próg obniżony o ~10%) — tylko jeśli nie ma extreme
+        elif rsi is not None and (rsi < 45 or rsi > 55):
+            confirm_4h = rsi4 is not None and (rsi4 < 43 or rsi4 > 57)
             confirm_5m = rsi5 is not None and (
-                (rsi < 42 and rsi5 < 45) or (rsi > 58 and rsi5 > 55)
+                (rsi < 45 and rsi5 < 48) or (rsi > 55 and rsi5 > 52)
             )
             score = 1.5 + (2.0 if confirm_4h else 0.0) + (0.5 if confirm_5m else 0.0)
             out.append({
@@ -427,8 +427,8 @@ class SignalScanner:
                                 "4h_confirm": confirm_4h, "5m_confirm": confirm_5m},
             })
 
-        # Pivot bounce (cena ±0.8% od S1 lub R1)
-        if s1 is not None and abs(price - s1) / price < 0.008:
+        # Pivot bounce (cena ±0.9% od S1 lub R1 — próg rozszerzony o ~10%)
+        if s1 is not None and abs(price - s1) / price < 0.009:
             out.append({
                 "symbol":      symbol,
                 "signal_type": "pivot_bounce",
@@ -440,7 +440,7 @@ class SignalScanner:
                                 "dist_pct": round(abs(price - s1) / price * 100, 3)},
             })
 
-        if r1 is not None and abs(price - r1) / price < 0.008:
+        if r1 is not None and abs(price - r1) / price < 0.009:
             out.append({
                 "symbol":      symbol,
                 "signal_type": "pivot_bounce",
@@ -452,10 +452,10 @@ class SignalScanner:
                                 "dist_pct": round(abs(price - r1) / price * 100, 3)},
             })
 
-        # EMA cross / momentum (gap EMA9-EMA21 > 0.1%)
+        # EMA cross / momentum (gap EMA9-EMA21 > 0.09% — próg obniżony o ~10%)
         if ema9 is not None and ema21 is not None and ema21 > 0:
             gap_pct = abs(ema9 - ema21) / ema21
-            if gap_pct > 0.001:
+            if gap_pct > 0.0009:
                 # 5m EMA9 aligned = wejście z trendem na niższym TF
                 aligned_5m = ema9_5m is not None and (
                     (ema9 > ema21 and ema9_5m > ema9) or
@@ -473,8 +473,8 @@ class SignalScanner:
                                     "ema9_5m": ema9_5m, "5m_aligned": aligned_5m},
                 })
 
-        # MACD momentum (histogram > 0.05% ceny)
-        if macd_h is not None and price > 0 and abs(macd_h) / price > 0.0005:
+        # MACD momentum (histogram > 0.045% ceny — próg obniżony o ~10%)
+        if macd_h is not None and price > 0 and abs(macd_h) / price > 0.00045:
             out.append({
                 "symbol":      symbol,
                 "signal_type": "macd_momentum",
@@ -578,7 +578,7 @@ Dla KAŻDEGO sygnału oceń:
 3. Sugerowane SL% i TP% jako ułamek dziesiętny (np. 0.015 = 1.5%)
    Bierz pod uwagę ATR i volatility przy dobieraniu SL/TP.
 
-Bądź konserwatywny — valid=true TYLKO gdy setup jest czytelny w danym kierunku.
+valid=true gdy setup jest technicznie sensowny — nie bądź nadmiernie konserwatywny.
 Oceniaj każdy sygnał niezależnie — nie odrzucaj wszystkich shortów gdy rynek jest szeroko overbought.
 
 Odpowiedz WYŁĄCZNIE JSON:
@@ -654,6 +654,22 @@ Odpowiedz WYŁĄCZNIE JSON:
 
     # ────────────────────────────────── główna pętla ───────
 
+    @staticmethod
+    def _all_agents_busy() -> bool:
+        """True jeśli każdy aktywny agent ma otwartą pozycję — skan niepotrzebny."""
+        try:
+            from database.db import get_all_agents, get_connection
+            active = [a for a in get_all_agents() if a["status"] == "active"]
+            if not active:
+                return False
+            with get_connection() as conn:
+                busy = conn.execute(
+                    "SELECT COUNT(DISTINCT agent_id) FROM trades WHERE status='open'"
+                ).fetchone()[0]
+            return busy >= len(active)
+        except Exception:
+            return False
+
     async def run(self):
         """
         Główna pętla scannera.
@@ -668,6 +684,11 @@ Odpowiedz WYŁĄCZNIE JSON:
         while True:
             try:
                 now = time.time()
+
+                if self._all_agents_busy():
+                    logger.debug("Scanner: wszyscy agenci zajęci — pomijam skan")
+                    await asyncio.sleep(FAST_SCAN_INTERVAL)
+                    continue
 
                 from data.market_feed import get_all_tokens
                 tokens = await asyncio.get_event_loop().run_in_executor(None, get_all_tokens)

@@ -33,6 +33,9 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("openai._base_client").setLevel(logging.WARNING)
 logger = logging.getLogger("main")
 
 
@@ -170,12 +173,11 @@ async def main():
 
     # 4. Uruchom wszystkie komponenty równolegle
     tasks = [
-        asyncio.create_task(_run_market_feed(),       name="market_feed"),
-        asyncio.create_task(_run_signal_scanner(),    name="signal_scanner"),
-        asyncio.create_task(_run_dashboard(),         name="dashboard"),
-        asyncio.create_task(_run_telegram(),          name="telegram"),
-        asyncio.create_task(_run_position_monitor(),  name="position_monitor"),
-        asyncio.create_task(_run_openclaw(),          name="openclaw"),
+        asyncio.create_task(_run_market_feed(),    name="market_feed"),
+        asyncio.create_task(_run_signal_scanner(), name="signal_scanner"),
+        asyncio.create_task(_run_dashboard(),      name="dashboard"),
+        asyncio.create_task(_run_telegram(),       name="telegram"),
+        asyncio.create_task(_run_openclaw(),       name="openclaw"),
     ]
 
     # 5. Graceful shutdown (SIGTERM / SIGINT)

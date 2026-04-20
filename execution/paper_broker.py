@@ -197,6 +197,61 @@ def close(trade_id: int, exit_price: float | None, reason: str) -> dict:
     }
 
 
+def partial_close(trade_id: int, close_pct: float, exit_price: float | None, reason: str) -> dict:
+    """Zamknij część pozycji (close_pct 0.1–0.9). Reszta zostaje otwarta."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM trades WHERE id=? AND status='open'", (trade_id,)
+        ).fetchone()
+    if not row:
+        return {"success": False, "message": f"Trade {trade_id} nie istnieje lub zamknięty"}
+
+    trade      = dict(row)
+    close_pct  = max(0.1, min(0.9, close_pct))
+    if exit_price is None:
+        try:
+            exit_price = _get_price(trade["token"])
+        except ValueError as e:
+            return {"success": False, "message": str(e)}
+
+    leverage     = float(trade.get("leverage") or 1)
+    full_size    = float(trade["size_usdt"])
+    close_size   = round(full_size * close_pct, 4)
+    remain_size  = round(full_size - close_size, 4)
+
+    if trade["direction"] == "long":
+        pnl = (exit_price - trade["entry_price"]) / trade["entry_price"] * close_size * leverage
+    else:
+        pnl = (trade["entry_price"] - exit_price) / trade["entry_price"] * close_size * leverage
+    pnl = round(pnl, 4)
+
+    agent = get_agent(trade["agent_id"])
+    with get_connection() as conn:
+        conn.execute("UPDATE trades SET size_usdt=? WHERE id=?", (remain_size, trade_id))
+    update_agent(
+        trade["agent_id"],
+        used_usdt=max(0.0, agent["used_usdt"] - close_size),
+        pnl_usdt=agent["pnl_usdt"] + pnl,
+        budget_usdt=round(agent["budget_usdt"] + pnl, 4),
+    )
+    sign = "+" if pnl >= 0 else ""
+    log_activity(
+        trade["agent_id"],
+        f"PAPER PARTIAL CLOSE {int(close_pct*100)}% {trade['token']} @${exit_price:.6f} "
+        f"| PnL: {sign}{pnl} | Pozostało: ${remain_size} | {reason}",
+        "info",
+    )
+    return {
+        "success":        True,
+        "trade_id":       trade_id,
+        "pnl_usdt":       pnl,
+        "exit_price":     exit_price,
+        "closed_size":    close_size,
+        "remaining_size": remain_size,
+        "mode":           "paper",
+    }
+
+
 def simulate_price_move(trade_id: int) -> dict | None:
     """
     Sprawdź czy otwarta pozycja paper osiągnęła SL lub TP.

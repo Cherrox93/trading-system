@@ -123,6 +123,26 @@ def log_trade_open(agent_id: str, token: str, direction: str,
     return trade_id
 
 
+def modify_trade_levels(trade_id: int, sl_price: float = None, tp_price: float = None):
+    """Zmień SL i/lub TP otwartej pozycji."""
+    with get_connection() as conn:
+        if sl_price is not None and tp_price is not None:
+            conn.execute(
+                "UPDATE trades SET sl_price=?, tp_price=? WHERE id=? AND status='open'",
+                (sl_price, tp_price, trade_id),
+            )
+        elif sl_price is not None:
+            conn.execute(
+                "UPDATE trades SET sl_price=? WHERE id=? AND status='open'",
+                (sl_price, trade_id),
+            )
+        elif tp_price is not None:
+            conn.execute(
+                "UPDATE trades SET tp_price=? WHERE id=? AND status='open'",
+                (tp_price, trade_id),
+            )
+
+
 def log_trade_close(trade_id: int, exit_price: float, pnl_usdt: float):
     with get_connection() as conn:
         trade = conn.execute(
