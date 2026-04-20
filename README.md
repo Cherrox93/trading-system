@@ -119,7 +119,7 @@ Switch via `.env` only. No code changes required.
 |---|---|
 | Agent framework | OpenClaw |
 | Fast LLM | Gemini 2.5 Flash Lite · Groq Llama 4 Scout (fallback) |
-| Deep LLM | DeepSeek R1 via OpenRouter |
+| Deep LLM | DeepSeek R1 |
 | KB importer | Groq Llama 4 Scout (text + vision) |
 | Knowledge Base | ChromaDB + sentence-transformers |
 | Technical indicators | pandas-ta (RSI, EMA, MACD, ATR, Pivot Points) |
