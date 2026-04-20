@@ -1,0 +1,35 @@
+# ==============================================
+# TRADING SYSTEM — ZALEŻNOŚCI
+# pip install -r deploy/requirements.txt
+# ==============================================
+
+# Web framework + dashboard
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+websockets>=12.0
+httpx>=0.27.0
+
+# LLM
+openai>=1.30.0
+
+# Knowledge Base
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+
+# DEX
+lighter-sdk>=1.0.8
+
+# Data
+pandas>=2.2.0
+numpy>=1.26.0
+pandas-ta>=0.3.14b
+
+# Knowledge Base Importer
+PyMuPDF>=1.24.0
+
+# Utils
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+
+# Agent framework
+openclaw>=2026.1.29

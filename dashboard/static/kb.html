@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Knowledge Base — Trading System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ── Reset ── */
+*{box-sizing:border-box;margin:0;padding:0}
+
+/* ── Tokens ── */
+:root{
+  --bg:        #0d0f17;
+  --surface:   #131620;
+  --surface2:  #1a1d2e;
+  --surface3:  #20243a;
+  --border:    #252840;
+  --border2:   #2e3352;
+  --text:      #e2e5f0;
+  --text2:     #8892b0;
+  --text3:     #4a5068;
+  --green:     #10d97a;
+  --green-dim: #0a8a4d;
+  --red:       #f0455a;
+  --red-dim:   #8a1c28;
+  --blue:      #4d9eff;
+  --blue-dim:  #1a3d6e;
+  --amber:     #f5a623;
+  --amber-dim: #6b4510;
+  --purple:    #a78bfa;
+  --radius:    10px;
+  --radius-sm: 6px;
+}
+
+/* ── Base ── */
+body{
+  font-family:'Inter',system-ui,sans-serif;
+  background:var(--bg);
+  color:var(--text);
+  min-height:100vh;
+  overflow-x:hidden;
+  font-size:13px;
+  line-height:1.5;
+}
+
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--text3)}
+
+/* ── Top bar ── */
+.topbar{
+  background:var(--surface);
+  border-bottom:1px solid var(--border);
+  padding:0 20px;
+  height:52px;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  position:sticky;
+  top:0;
+  z-index:100;
+  backdrop-filter:blur(12px);
+}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-icon{
+  width:28px;height:28px;
+  background:linear-gradient(135deg,#10d97a22,#4d9eff22);
+  border:1px solid var(--green-dim);
+  border-radius:7px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:14px;font-weight:700;color:var(--green);
+}
+.logo-text{font-size:13px;font-weight:700;letter-spacing:.5px;color:var(--text)}
+.logo-text span{color:var(--green)}
+
+/* ── Page ── */
+.page{padding:20px}
+
+/* ── Stats bar ── */
+.stats-bar{
+  display:flex;gap:0;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  margin-bottom:20px;
+  overflow:hidden;
+}
+.stat-item{
+  flex:1;
+  padding:12px 16px;
+  border-right:1px solid var(--border);
+  display:flex;flex-direction:column;gap:3px;
+}
+.stat-item:last-child{border-right:none}
+.stat-l{font-size:9px;font-weight:600;color:var(--text3);letter-spacing:.8px;text-transform:uppercase}
+.stat-v{font-size:18px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;line-height:1}
+.stat-v.green{color:var(--green)}
+.stat-model{font-size:10px;font-weight:500;color:var(--blue)}
+
+/* ── Grid ── */
+.grid{display:grid;gap:16px}
+.grid-2{grid-template-columns:repeat(auto-fit,minmax(360px,1fr))}
+
+/* ── Cards ── */
+.card{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:16px;
+}
+.card.full{grid-column:1/-1}
+.card-title{
+  font-size:10px;font-weight:700;
+  color:var(--text2);
+  letter-spacing:.6px;text-transform:uppercase;
+  margin-bottom:14px;
+  display:flex;align-items:center;gap:7px;
+}
+.card-title::before{
+  content:'';width:3px;height:14px;
+  background:var(--green);border-radius:2px;
+}
+
+/* ── Upload zone ── */
+.upload-zone{
+  border:2px dashed var(--border2);
+  border-radius:var(--radius-sm);
+  padding:28px 20px;
+  text-align:center;
+  cursor:pointer;
+  transition:border-color .2s,background .2s;
+  margin-bottom:12px;
+}
+.upload-zone:hover,.upload-zone.drag-over{
+  border-color:var(--green);
+  background:rgba(16,217,122,.04);
+}
+.upload-icon{font-size:26px;margin-bottom:8px}
+.upload-label{font-size:12px;font-weight:500;color:var(--text2);margin-bottom:4px}
+.upload-hint{font-size:10px;color:var(--text3)}
+
+/* ── Options ── */
+.options{display:flex;gap:16px;margin-bottom:12px;flex-wrap:wrap}
+.opt-label{
+  display:flex;align-items:center;gap:6px;
+  font-size:11px;color:var(--text2);cursor:pointer;user-select:none;
+}
+input[type=checkbox]{accent-color:var(--green);width:13px;height:13px}
+
+/* ── Inputs ── */
+input[type=text],input[type=number],select{
+  background:var(--surface2);
+  border:1px solid var(--border);
+  color:var(--text);
+  font-family:'Inter',sans-serif;
+  font-size:12px;
+  padding:7px 10px;
+  border-radius:var(--radius-sm);
+  transition:border-color .15s;
+  outline:none;
+}
+input[type=text]:focus,input[type=number]:focus{border-color:var(--green)}
+
+/* ── Search box ── */
+.search-box{display:flex;gap:8px;margin-bottom:12px}
+.search-box input{flex:1}
+
+/* ── Buttons ── */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  background:var(--surface2);
+  border:1px solid var(--border2);
+  color:var(--text);
+  font-family:'Inter',sans-serif;
+  font-size:11px;font-weight:600;
+  padding:7px 14px;border-radius:var(--radius-sm);
+  cursor:pointer;letter-spacing:.4px;
+  white-space:nowrap;
+  transition:background .15s,border-color .15s,color .15s;
+}
+.btn:hover{background:var(--surface3);border-color:var(--text3)}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+.btn-primary{background:#0a3d22;border-color:var(--green-dim);color:var(--green)}
+.btn-primary:hover{background:#0d5a30;border-color:var(--green)}
+.btn-warn{background:var(--amber-dim);border-color:#8a5c10;color:var(--amber)}
+.btn-warn:hover{background:#5a3a0a}
+.btn-danger{background:var(--red-dim);border-color:var(--red-dim);color:var(--red)}
+.btn-danger:hover{background:#6a1c28}
+
+/* ── Result blocks ── */
+.result{
+  border-radius:var(--radius-sm);
+  padding:10px 12px;
+  font-size:11px;
+  margin-top:8px;
+  border:1px solid var(--border);
+}
+.result.success {border-color:var(--green-dim);background:#0a1f15}
+.result.warning {border-color:#8a5c10;background:#1a1400}
+.result.error   {border-color:var(--red-dim);background:#1a0810}
+.result.duplicate{border-color:#8a4510;background:#1a1000}
+.result.similar {border-color:#8a5c10;background:#181000}
+.result.info    {border-color:var(--border);background:var(--surface2)}
+.result-title{font-weight:600;color:var(--text);margin-bottom:4px;font-size:12px}
+.result-body{color:var(--text2)}
+.result-actions{display:flex;gap:8px;margin-top:10px}
+
+/* ── Loading ── */
+.loading{display:none;color:var(--amber);font-size:11px;margin-top:8px;align-items:center;gap:6px}
+.loading.active{display:flex}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner{
+  width:12px;height:12px;
+  border:2px solid var(--border2);
+  border-top-color:var(--amber);
+  border-radius:50%;
+  animation:spin .7s linear infinite;
+  flex-shrink:0;
+}
+
+/* ── Table ── */
+.tbl{width:100%;border-collapse:collapse;font-size:12px}
+.tbl th{
+  color:var(--text3);
+  text-align:left;
+  padding:8px 12px;
+  font-size:10px;font-weight:600;
+  letter-spacing:.5px;text-transform:uppercase;
+  border-bottom:1px solid var(--border);
+  white-space:nowrap;
+}
+.tbl td{
+  padding:9px 12px;
+  border-bottom:1px solid var(--border);
+  vertical-align:middle;
+}
+.tbl tr:last-child td{border-bottom:none}
+.tbl tbody tr:hover td{background:var(--surface2)}
+
+/* ── Badges ── */
+.badge{
+  display:inline-flex;align-items:center;
+  padding:2px 8px;border-radius:4px;
+  font-size:10px;font-weight:600;letter-spacing:.4px;
+}
+.badge-mr {background:#0a1f35;color:var(--blue);border:1px solid #1a3d6e}
+.badge-mo {background:var(--amber-dim);color:var(--amber);border:1px solid #8a5c10}
+.badge-br {background:var(--red-dim);color:var(--red);border:1px solid #5a1c28}
+.badge-vo {background:#0a3d22;color:var(--green);border:1px solid #0a5c33}
+.badge-hy {background:#1a1035;color:var(--purple);border:1px solid #3a2060}
+
+/* ── Section label ── */
+.section-label{
+  font-size:10px;font-weight:600;
+  color:var(--text3);
+  letter-spacing:.8px;
+  text-transform:uppercase;
+  margin-bottom:10px;
+  display:flex;align-items:center;gap:8px;
+}
+.section-label::after{content:'';flex:1;height:1px;background:var(--border)}
+
+/* ── Back link ── */
+.back-link{
+  display:flex;align-items:center;gap:6px;
+  font-size:11px;font-weight:500;
+  color:var(--text3);
+  text-decoration:none;
+  padding:4px 10px;
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  transition:color .15s,border-color .15s;
+}
+.back-link:hover{color:var(--text);border-color:var(--border2)}
+
+/* ── Toast ── */
+.notify{
+  position:fixed;bottom:20px;right:20px;
+  background:var(--surface2);
+  border:1px solid var(--border2);
+  border-radius:var(--radius);
+  padding:12px 16px;
+  font-size:12px;font-weight:500;
+  max-width:300px;z-index:999;
+  display:none;
+  box-shadow:0 8px 32px #00000060;
+}
+.notify.show{display:block;animation:slideIn .2s ease}
+.notify.ok{border-color:var(--green-dim);color:var(--green)}
+.notify.err{border-color:var(--red-dim);color:var(--red)}
+
+/* ── Animations ── */
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@keyframes slideIn{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
+.page{animation:fadeIn .2s ease}
+
+/* ── Responsive ── */
+@media(max-width:640px){
+  .grid-2{grid-template-columns:1fr}
+  .stats-bar{flex-wrap:wrap}
+  .stat-item{flex:1 1 40%;border-bottom:1px solid var(--border)}
+  .page{padding:12px}
+}
+</style>
+</head>
+<body>
+
+<!-- Top Bar -->
+<div class="topbar">
+  <div style="display:flex;align-items:center;gap:16px">
+    <div class="logo">
+      <div class="logo-icon">T</div>
+      <span class="logo-text">TRADING<span>SYS</span></span>
+    </div>
+    <span style="color:var(--text3);font-size:11px;font-weight:500;letter-spacing:.4px">/ Knowledge Base</span>
+  </div>
+  <a href="/static/index.html" class="back-link">
+    ← Dashboard
+  </a>
+</div>
+
+<!-- Page -->
+<div class="page">
+
+  <!-- Stats -->
+  <div class="stats-bar">
+    <div class="stat-item">
+      <span class="stat-l">Strategie</span>
+      <span class="stat-v green" id="total-count">—</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-l">Mean Rev</span>
+      <span class="stat-v" id="cnt-mr">—</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-l">Momentum</span>
+      <span class="stat-v" id="cnt-mo">—</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-l">Breakout</span>
+      <span class="stat-v" id="cnt-br">—</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-l">Volume</span>
+      <span class="stat-v" id="cnt-vo">—</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-l">Hybrid</span>
+      <span class="stat-v" id="cnt-hy">—</span>
+    </div>
+    <div class="stat-item" style="border-right:none">
+      <span class="stat-l">Model</span>
+      <span class="stat-model">Gemini Flash</span>
+    </div>
+  </div>
+
+  <div class="grid grid-2">
+
+    <!-- Upload -->
+    <div class="card">
+      <div class="card-title">Dodaj strategie</div>
+
+      <div class="upload-zone" id="upload-zone">
+        <div class="upload-icon">📊</div>
+        <div class="upload-label">Przeciągnij plik lub kliknij aby wybrać</div>
+        <div class="upload-hint" style="margin-top:4px">PNG, JPG, WEBP — wykres lub pattern tradingowy</div>
+        <div class="upload-hint">PDF — książka lub artykuł ze strategiami</div>
+      </div>
+      <input type="file" id="file-input" accept=".png,.jpg,.jpeg,.webp,.pdf" style="display:none">
+
+      <div class="options">
+        <label class="opt-label">
+          <input type="checkbox" id="opt-force">
+          Dodaj mimo błędów walidacji
+        </label>
+        <label class="opt-label">
+          <input type="checkbox" id="opt-variant">
+          Podobne dodaj jako wariant
+        </label>
+      </div>
+
+      <button class="btn btn-primary" id="upload-btn" disabled>
+        ▶ Analizuj i dodaj
+      </button>
+
+      <div class="loading" id="upload-loading">
+        <div class="spinner"></div>
+        Analizuje przez Gemini Flash…
+      </div>
+
+      <div id="upload-results"></div>
+    </div>
+
+    <!-- Search -->
+    <div class="card">
+      <div class="card-title">Szukaj w bazie</div>
+      <div class="search-box">
+        <input type="text" id="search-input"
+               placeholder="np. mean reversion pivot oversold…">
+        <button class="btn btn-primary" id="search-btn">Szukaj</button>
+      </div>
+      <div id="search-results">
+        <div style="color:var(--text3);font-size:11px;text-align:center;padding:24px 0">
+          Wpisz zapytanie aby przeszukać bazę strategii
+        </div>
+      </div>
+    </div>
+
+    <!-- Strategies table -->
+    <div class="card full">
+      <div class="card-title">Wszystkie strategie</div>
+      <div style="overflow-x:auto">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>Nazwa</th>
+              <th>Kategoria</th>
+              <th>Trudność</th>
+              <th>Win Rate</th>
+              <th>Źródło</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="strategy-list">
+            <tr><td colspan="6" style="color:var(--text3);text-align:center;padding:32px">Ładowanie…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="notify" id="notify"></div>
+
+<script>
+const BADGE = {
+  mean_reversion: "badge-mr",
+  momentum:       "badge-mo",
+  breakout:       "badge-br",
+  volume:         "badge-vo",
+  hybrid:         "badge-hy",
+};
+
+document.addEventListener("DOMContentLoaded", () => {
+  loadStrategies();
+  setupUpload();
+  document.getElementById("search-btn")
+    .addEventListener("click", doSearch);
+  document.getElementById("search-input")
+    .addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+});
+
+// ── Strategie ──────────────────────────────────────────────
+
+async function loadStrategies() {
+  try {
+    const r    = await fetch("/kb/strategies");
+    const data = await r.json();
+    renderList(data.strategies || []);
+    renderStats(data.strategies || []);
+  } catch (e) {
+    document.getElementById("strategy-list").innerHTML =
+      `<tr><td colspan="6" style="color:var(--red);text-align:center;padding:24px">Błąd: ${e.message}</td></tr>`;
+  }
+}
+
+function renderStats(strats) {
+  const c = strats.reduce((a, s) => {
+    a[s.category] = (a[s.category] || 0) + 1;
+    return a;
+  }, {});
+  document.getElementById("total-count").textContent = strats.length;
+  document.getElementById("cnt-mr").textContent = c.mean_reversion || 0;
+  document.getElementById("cnt-mo").textContent = c.momentum       || 0;
+  document.getElementById("cnt-br").textContent = c.breakout       || 0;
+  document.getElementById("cnt-vo").textContent = c.volume         || 0;
+  document.getElementById("cnt-hy").textContent = c.hybrid         || 0;
+}
+
+function renderList(strats) {
+  const tbody = document.getElementById("strategy-list");
+  if (!strats.length) {
+    tbody.innerHTML = `<tr><td colspan="6" style="color:var(--text3);text-align:center;padding:32px">
+      Brak strategii w bazie
+    </td></tr>`;
+    return;
+  }
+  tbody.innerHTML = strats.map(s => {
+    const badge = BADGE[s.category] || "badge-hy";
+    const src   = s.source === "image_upload" ? "IMG"
+                : s.source === "pdf_upload"   ? "PDF" : "MD";
+    return `<tr>
+      <td style="font-weight:600;color:var(--text)">${s.name}</td>
+      <td><span class="badge ${badge}">${s.category}</span></td>
+      <td style="color:var(--text2)">${s.difficulty}</td>
+      <td style="font-variant-numeric:tabular-nums">${s.win_rate}</td>
+      <td>
+        <span class="badge" style="background:var(--surface2);color:var(--text3);border:1px solid var(--border)"
+              title="${s.source}">${src}</span>
+      </td>
+      <td>
+        <button class="btn btn-danger"
+                style="padding:3px 10px;font-size:10px"
+                onclick="deleteStrat('${s.id}','${s.name.replace(/'/g,"\\'")}')">
+          Usuń
+        </button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+// ── Upload ─────────────────────────────────────────────────
+
+function setupUpload() {
+  const zone  = document.getElementById("upload-zone");
+  const input = document.getElementById("file-input");
+  const btn   = document.getElementById("upload-btn");
+
+  zone.addEventListener("click", () => input.click());
+  zone.addEventListener("dragover", e => {
+    e.preventDefault();
+    zone.classList.add("drag-over");
+  });
+  zone.addEventListener("dragleave", () => zone.classList.remove("drag-over"));
+  zone.addEventListener("drop", e => {
+    e.preventDefault();
+    zone.classList.remove("drag-over");
+    if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+  });
+  input.addEventListener("change", () => {
+    if (input.files[0]) setFile(input.files[0]);
+  });
+  btn.addEventListener("click", doUpload);
+}
+
+let selectedFile = null;
+
+function setFile(file) {
+  selectedFile = file;
+  document.getElementById("upload-zone").innerHTML = `
+    <div class="upload-icon">✓</div>
+    <div class="upload-label" style="color:var(--green)">${file.name}</div>
+    <div class="upload-hint">${(file.size / 1024).toFixed(1)} KB · kliknij aby zmienić</div>
+  `;
+  document.getElementById("upload-btn").disabled = false;
+  document.getElementById("upload-results").innerHTML = "";
+}
+
+async function doUpload() {
+  if (!selectedFile) return;
+  const btn     = document.getElementById("upload-btn");
+  const loading = document.getElementById("upload-loading");
+  const results = document.getElementById("upload-results");
+
+  btn.disabled = true;
+  loading.classList.add("active");
+  results.innerHTML = "";
+
+  const fd = new FormData();
+  fd.append("file",        selectedFile);
+  fd.append("force_add",   document.getElementById("opt-force").checked);
+  fd.append("add_variant", document.getElementById("opt-variant").checked);
+
+  try {
+    const r    = await fetch("/kb/upload", { method: "POST", body: fd });
+    const data = await r.json();
+    renderResults(data);
+    if (data.strategies_added > 0) {
+      loadStrategies();
+      notify(`Dodano ${data.strategies_added} strategii`, "ok");
+    }
+  } catch (e) {
+    results.innerHTML = mkResult("error", "Błąd połączenia", e.message);
+  } finally {
+    btn.disabled = false;
+    loading.classList.remove("active");
+  }
+}
+
+function renderResults(data) {
+  const div = document.getElementById("upload-results");
+  if (!data.success) {
+    div.innerHTML = mkResult("error", "Błąd", data.error);
+    return;
+  }
+  if (!data.strategies_found) {
+    div.innerHTML = mkResult("warning", "Brak strategii",
+      "Materiał nie zawiera rozpoznawalnych strategii tradingowych.");
+    return;
+  }
+  div.innerHTML = data.results.map(r => {
+    if (r.status === "added")
+      return mkResult("success",
+        `✓ ${r.name}`,
+        `Dodano → ${r.filename}` + (r.is_variant ? " (wariant)" : "") +
+        (r.validation?.warnings?.length
+          ? `<br><span style="color:var(--amber)">${r.validation.warnings.join(", ")}</span>`
+          : ""));
+    if (r.status === "duplicate")
+      return mkResult("duplicate",
+        `Duplikat — ${r.name}`,
+        r.message,
+        `<button class="btn btn-warn" onclick="forceReupload()">Dodaj mimo to</button>`);
+    if (r.status === "similar")
+      return mkResult("similar",
+        `Podobna — ${r.name}`,
+        r.message,
+        `<button class="btn btn-warn" onclick="uploadAsVariant()">Dodaj jako wariant</button>
+         <button class="btn btn-danger" onclick="this.closest('.result').remove()">Odrzuć</button>`);
+    if (r.status === "invalid")
+      return mkResult("error",
+        `Błąd walidacji — ${r.name}`,
+        `Błędy: ${r.errors?.join("; ")}`);
+    if (r.status === "no_strategy")
+      return mkResult("warning", "Brak strategii", r.message);
+    return mkResult("info", r.name || "—", r.message || "");
+  }).join("");
+}
+
+function mkResult(type, title, body, actions = "") {
+  return `<div class="result ${type}">
+    <div class="result-title">${title}</div>
+    <div class="result-body">${body}</div>
+    ${actions ? `<div class="result-actions">${actions}</div>` : ""}
+  </div>`;
+}
+
+function forceReupload() {
+  document.getElementById("opt-force").checked = true;
+  doUpload();
+}
+
+function uploadAsVariant() {
+  document.getElementById("opt-variant").checked = true;
+  doUpload();
+}
+
+// ── Search ─────────────────────────────────────────────────
+
+async function doSearch() {
+  const query = document.getElementById("search-input").value.trim();
+  if (!query) return;
+
+  const div = document.getElementById("search-results");
+  div.innerHTML = `<div style="color:var(--amber);font-size:11px;display:flex;align-items:center;gap:6px;padding:8px 0">
+    <div style="width:10px;height:10px;border:2px solid var(--border2);border-top-color:var(--amber);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0"></div>
+    Szukam…
+  </div>`;
+
+  try {
+    const r    = await fetch("/kb/search", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ query, n: 5 }),
+    });
+    const data = await r.json();
+
+    if (!data.results?.length) {
+      div.innerHTML = `<div style="color:var(--text3);font-size:11px;text-align:center;padding:24px 0">
+        Brak wyników dla: „${query}"
+      </div>`;
+      return;
+    }
+
+    div.innerHTML = data.results.map(r => {
+      const badge = BADGE[r.category] || "badge-hy";
+      const pct   = Math.round((r.similarity || 0) * 100);
+      return `<div class="result info" style="margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px">
+          <div class="result-title" style="margin:0">${r.name}</div>
+          <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+            <span class="badge ${badge}">${r.category}</span>
+            <span style="font-size:10px;font-weight:600;color:${pct>=80?'var(--green)':pct>=60?'var(--amber)':'var(--text3)'}">${pct}%</span>
+          </div>
+        </div>
+        <div style="color:var(--text3);font-size:10px;font-family:'JetBrains Mono',monospace">${r.id}</div>
+        <div style="color:var(--text2);font-size:11px;margin-top:6px;line-height:1.5">${r.summary}…</div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    div.innerHTML = `<div style="color:var(--red);font-size:11px">Błąd: ${e.message}</div>`;
+  }
+}
+
+// ── Delete ─────────────────────────────────────────────────
+
+async function deleteStrat(id, name) {
+  if (!confirm(`Usunąć strategię "${name}"?`)) return;
+  try {
+    await fetch(`/kb/strategy/${id}`, { method: "DELETE" });
+    loadStrategies();
+    notify(`Usunięto: ${name}`, "ok");
+  } catch (e) {
+    notify(`Błąd: ${e.message}`, "err");
+  }
+}
+
+// ── Toast ──────────────────────────────────────────────────
+
+function notify(msg, type = "ok") {
+  const el = document.getElementById("notify");
+  el.textContent = msg;
+  el.className   = `notify show ${type}`;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove("show"), 3500);
+}
+</script>
+</body>
+</html>

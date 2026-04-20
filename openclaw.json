@@ -1,0 +1,69 @@
+{
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 18789,
+    "auth": {
+      "enabled": true,
+      "secret": "${DASHBOARD_SECRET}"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "models": {
+        "primary": "groq:meta-llama/llama-4-scout-17b-16e-instruct",
+        "deep": "deepseek:deepseek-reasoner"
+      },
+      "memory": {
+        "enabled": true,
+        "backend": "sqlite",
+        "path": "./database/trading.db"
+      }
+    },
+    "list": [
+      {
+        "name": "supervisor",
+        "workspace": "./workspaces/supervisor",
+        "model": {
+          "primary": "deepseek:deepseek-reasoner",
+          "fallback": "groq:meta-llama/llama-4-scout-17b-16e-instruct"
+        }
+      },
+      {
+        "name": "trader_01",
+        "workspace": "./workspaces/trader_01",
+        "model": {
+          "primary": "groq:meta-llama/llama-4-scout-17b-16e-instruct",
+          "deep": "deepseek:deepseek-reasoner"
+        }
+      },
+      {
+        "name": "trader_02",
+        "workspace": "./workspaces/trader_02",
+        "model": {
+          "primary": "groq:meta-llama/llama-4-scout-17b-16e-instruct",
+          "deep": "deepseek:deepseek-reasoner"
+        }
+      },
+      {
+        "name": "trader_03",
+        "workspace": "./workspaces/trader_03",
+        "model": {
+          "primary": "groq:meta-llama/llama-4-scout-17b-16e-instruct",
+          "deep": "deepseek:deepseek-reasoner"
+        }
+      }
+    ]
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "${TELEGRAM_BOT_TOKEN}",
+      "allowed_users": ["${TELEGRAM_CHAT_ID}"]
+    }
+  },
+  "security": {
+    "bind_localhost_only": true,
+    "skill_allowlist": true,
+    "shell_commands": false
+  }
+}

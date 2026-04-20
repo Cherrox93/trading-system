@@ -1,0 +1,33 @@
+# ==============================================
+# TRADING SYSTEM — PANEL STEROWANIA
+# Edytuj ręcznie lub przez komendy Telegram
+# Supervisor czyta ten plik co godzinę
+# ==============================================
+
+system:
+  trading_mode: paper          # paper/live — nie zmieniaj tutaj, użyj .env
+  supervisor_review_hours: 24  # jak często Supervisor robi przegląd
+  max_agents: 10               # maksymalna liczba aktywnych agentów
+  total_budget_usdt: 30.0      # całkowity budżet systemu
+
+agents:
+  trader_01:
+    status: pending            # pending/active/paused/killed
+    budget_usdt: 10.0
+    token: WLD
+    personality: cautious
+    notes: ""
+
+  trader_02:
+    status: pending
+    budget_usdt: 10.0
+    token: SOL
+    personality: aggressive
+    notes: ""
+
+  trader_03:
+    status: pending
+    budget_usdt: 10.0
+    token: AVAX
+    personality: neutral
+    notes: ""

@@ -1,0 +1,13 @@
+.env
+*.db
+*.sqlite
+__pycache__/
+*.pyc
+.DS_Store
+database/chromadb/
+data/market_snapshot.json
+workspaces/trader_*/
+!workspaces/trader_template/
+!workspaces/supervisor/
+deploy/secrets/
+logs/
