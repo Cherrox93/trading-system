@@ -27,6 +27,13 @@ TRADER_POSITION_INTERVAL = 15
 SUPERVISOR_QUICK         = 6 * 3600
 SUPERVISOR_FULL          = 24 * 3600
 
+# ── Scalper config ─────────────────────────────────────────
+SCALPER_AGENTS   = {"scalper"}
+SCALPER_TOKENS   = {"SOL", "ETH", "BTC"}
+SCALPER_LEVERAGE = 100
+SCALPER_SCAN_INTERVAL     = 10
+SCALPER_POSITION_INTERVAL = 5
+
 # ── Timeouty LLM ──────────────────────────────────────────
 TRADER_LLM_TIMEOUT   = 60   # s
 SUPERVISOR_LLM_TIMEOUT = 120  # s
@@ -161,7 +168,7 @@ async def _generate_reflection(agent_id: str, trade: dict, close_reasoning: str)
         f"Respond in 3 short sentences max. Plain text only. No bullet points."
     )
     try:
-        reflection = await asyncio.wait_for(_deep_llm_call(prompt, max_tokens=150), timeout=60)
+        reflection = await asyncio.wait_for(_deep_llm_call(prompt, max_tokens=350), timeout=60)
         return reflection.strip()[:500]
     except Exception:
         return f"{outcome}: {trade.get('strategy_used','?')} on {trade.get('token','?')}"
@@ -245,6 +252,226 @@ async def _write_journal_entry(agent_id: str, trade: dict, close_reasoning: str)
         logger.debug(f"Journal write task error ({agent_id}): {e}")
 
 
+async def _scalper_beat(agent_id: str) -> bool:
+    """Heartbeat scalpera — tylko SOL/ETH/BTC, x100 leverage, bardzo ciasne SL/TP."""
+    from database.db import log_activity, get_agent
+
+    agent = get_agent(agent_id)
+    if not agent or agent["status"] != "active":
+        return True
+
+    data = _get_agent_data(agent_id)
+    if not data:
+        return False
+
+    budget     = data["agent"]["budget_usdt"]
+    used       = data["agent"]["used_usdt"]
+    available  = budget - used
+    open_trades = data["open_trades"]
+
+    if open_trades:
+        trade     = open_trades[0]
+        token_snap = _get_token_snapshot(trade["token"])
+        cur_price  = float(token_snap.get("price") or 0) if token_snap else 0.0
+
+        from datetime import datetime, timezone as _tz
+        time_in_pos = "?"
+        try:
+            ts  = datetime.fromisoformat(str(trade.get("timestamp","")).replace("Z","+00:00"))
+            if ts.tzinfo is None: ts = ts.replace(tzinfo=_tz.utc)
+            mins = int((datetime.now(_tz.utc) - ts).total_seconds() / 60)
+            time_in_pos = f"{mins}m"
+        except Exception:
+            mins = 0
+
+        unrealized = ""
+        if cur_price and trade.get("entry_price"):
+            ep  = float(trade["entry_price"])
+            sz  = float(trade.get("size_usdt") or 0)
+            upnl = ((cur_price - ep) / ep if trade["direction"] == "long" else (ep - cur_price) / ep) * sz * SCALPER_LEVERAGE
+            unrealized = f"Unrealized PnL: {upnl:+.4f}$"
+
+        sl_hit = cur_price and (
+            (trade["direction"] == "long"  and cur_price <= float(trade.get("sl_price") or 0)) or
+            (trade["direction"] == "short" and cur_price >= float(trade.get("sl_price") or 0))
+        )
+        tp_hit = cur_price and (
+            (trade["direction"] == "long"  and cur_price >= float(trade.get("tp_price") or 0)) or
+            (trade["direction"] == "short" and cur_price <= float(trade.get("tp_price") or 0))
+        )
+        alert = ""
+        if sl_hit:   alert = "\n!! SL BREACHED — close immediately !!"
+        elif tp_hit: alert = "\n!! TP REACHED — take profit now !!"
+        time_alert = "\n!! POSITION > 15min — consider closing, scalps should be fast !!" if mins >= 15 else ""
+
+        prompt = f"""You are SCALPER, an ultra-fast trading agent. You trade ONLY BTC, ETH, SOL with x100 leverage.
+
+OPEN POSITION:
+  Token: {trade["token"]} | Direction: {trade["direction"].upper()} | Leverage: x{SCALPER_LEVERAGE}
+  Entry: ${trade.get("entry_price","?")} | Size: ${trade.get("size_usdt","?")}
+  SL: ${trade.get("sl_price","?")} | TP: ${trade.get("tp_price","?")}
+  Current price: ${cur_price or "?"} | {unrealized}
+  Time in position: {time_in_pos}
+{alert}{time_alert}
+
+SCALPER RULES:
+- x100 leverage means 0.10% against you = 10% loss. BE STRICT with SL.
+- Max position time: 15 minutes. Scalps don't last longer.
+- ALWAYS close if SL or TP is hit.
+- Close early if: momentum reversed, OR time > 15min with < 0.10% profit.
+- Adjust SL to breakeven after 0.10% profit (protect capital).
+
+Respond with valid JSON only:
+{{
+  "decision": "hold" | "close" | "adjust_sl" | "adjust_tp",
+  "new_sl_price": 0.0,
+  "new_tp_price": 0.0,
+  "reasoning": "max 40 words",
+  "trade_id": {trade["id"]}
+}}"""
+
+    else:
+        # Brak pozycji — szukaj setupu tylko na SOL/ETH/BTC
+        signals = [s for s in _load_signals() if s.get("symbol","").upper() in SCALPER_TOKENS]
+        if not signals:
+            logger.debug(f"Scalper: brak sygnałów na SOL/ETH/BTC")
+            return True
+
+        signals_txt = ""
+        for s in signals[:5]:
+            ind = s.get("indicators", {})
+            signals_txt += (
+                f"\n--- {s['symbol']} {s.get('direction','?').upper()} "
+                f"[{s.get('signal_type','?')}] conf={int(s.get('confidence',0)*100)}% ---\n"
+                f"  Price: ${s.get('price','?')}\n"
+                f"  RSI_5m={ind.get('rsi_5m','?')} RSI_15m={ind.get('rsi_14','?')} "
+                f"ATR={ind.get('atr_14','?')}\n"
+                f"  EMA9_5m={ind.get('ema_9_5m','?')} EMA9={ind.get('ema_9','?')} EMA21={ind.get('ema_21','?')}\n"
+                f"  PP={ind.get('pivot_pp','?')} S1={ind.get('pivot_s1','?')} R1={ind.get('pivot_r1','?')}\n"
+                f"  Suggested SL={s.get('suggested_sl_pct','?')} TP={s.get('suggested_tp_pct','?')}\n"
+                f"  Context: {s.get('market_context','')[:100]}\n"
+            )
+
+        prompt = f"""You are SCALPER, an ultra-fast trading agent specializing in BTC, ETH, SOL only.
+Leverage is ALWAYS x100. You trade fast: in and out in 2-15 minutes.
+
+Budget: ${budget:.2f} | Available: ${available:.2f}
+
+MARKET SIGNALS (BTC/ETH/SOL only):
+{signals_txt}
+
+SCALPER ENTRY RULES:
+- ONLY enter BTC, ETH, or SOL — never other tokens
+- Leverage is FIXED at x100 — do NOT suggest other values
+- SL: 0.10–0.20% maximum (x100 means tight SL is essential)
+- TP: 0.15–0.35% (R:R minimum 1.5:1)
+- size_pct: 0.20–0.40 (20-40% of budget — manage risk with small size on x100)
+- Confidence >= 0.65 required (scalping is high-precision, skip weak setups)
+- Best setups: volume spike + momentum alignment, S/R flip retest, VWAP deviation
+
+Respond with valid JSON only:
+{{
+  "decision": "enter" or "skip",
+  "reasoning": "max 40 words",
+  "token": "BTC" | "ETH" | "SOL",
+  "direction": "long" or "short",
+  "size_pct": 0.30,
+  "leverage": 100,
+  "sl_pct": 0.0015,
+  "tp_pct": 0.0025,
+  "strategy": "scalp_strategy_name",
+  "confidence": 0.72
+}}
+Only enter if confidence >= 0.65 and token is BTC, ETH, or SOL."""
+
+    try:
+        raw    = await asyncio.wait_for(_llm_call(prompt, max_tokens=300), timeout=TRADER_LLM_TIMEOUT)
+        result = _parse_json(raw)
+    except asyncio.TimeoutError:
+        logger.warning(f"Scalper: LLM timeout")
+        return False
+    except Exception as e:
+        logger.warning(f"Scalper: LLM error — {e}")
+        return False
+
+    decision  = result.get("decision", "skip")
+    reasoning = result.get("reasoning", "")
+
+    if decision == "enter" and not open_trades:
+        token = (result.get("token") or "").upper()
+        if token not in SCALPER_TOKENS:
+            logger.info(f"Scalper: odrzucono {token} — tylko BTC/ETH/SOL")
+            return True
+
+        direction  = result.get("direction", "")
+        size_pct   = float(result.get("size_pct", 0.3))
+        sl_pct     = max(float(result.get("sl_pct", 0.0015)), 0.001)
+        tp_pct     = max(float(result.get("tp_pct", 0.002)), 0.0015)
+        strategy   = result.get("strategy", "scalp")
+        confidence = float(result.get("confidence", 0.5))
+
+        if confidence < 0.65:
+            logger.info(f"Scalper: SKIP {token} — conf={int(confidence*100)}% < 65%")
+            return True
+
+        size_usdt = min(budget * size_pct, available)
+        if size_usdt < 0.5:
+            logger.info(f"Scalper: za mały budżet")
+            return True
+
+        from execution.trade_executor import execute_trade
+        trade_result = execute_trade({
+            "agent_id":   agent_id,
+            "token":      token,
+            "direction":  direction,
+            "size_usdt":  round(size_usdt, 4),
+            "sl_pct":     sl_pct,
+            "tp_pct":     tp_pct,
+            "leverage":   SCALPER_LEVERAGE,
+            "strategy":   strategy,
+            "reasoning":  reasoning[:300],
+            "confidence": confidence,
+        })
+        if trade_result.get("success"):
+            logger.info(f"Scalper: ENTER {direction.upper()} {token} ${size_usdt:.2f} x{SCALPER_LEVERAGE}")
+        else:
+            logger.warning(f"Scalper: trade FAIL — {trade_result.get('message')}")
+
+    elif decision == "close" and open_trades:
+        orig = open_trades[0]
+        from execution.trade_executor import close_trade
+        close_result = close_trade(orig["id"], None, reasoning)
+        if close_result.get("success"):
+            logger.info(f"Scalper: CLOSE {orig['token']} PnL={close_result.get('pnl_usdt',0):+.4f}$")
+            from database.db import push_journal_queue
+            push_journal_queue(agent_id, {
+                **dict(orig),
+                "pnl_usdt":   close_result.get("pnl_usdt", 0),
+                "exit_price": close_result.get("exit_price"),
+                "status":     "closed",
+            }, reasoning)
+
+    elif decision == "adjust_sl" and open_trades:
+        new_sl = float(result.get("new_sl_price") or 0)
+        if new_sl > 0:
+            from execution.trade_executor import modify_trade
+            modify_trade(open_trades[0]["id"], sl_price=new_sl)
+            logger.info(f"Scalper: ADJUST_SL → {new_sl:.6f}")
+
+    elif decision == "adjust_tp" and open_trades:
+        new_tp = float(result.get("new_tp_price") or 0)
+        if new_tp > 0:
+            from execution.trade_executor import modify_trade
+            modify_trade(open_trades[0]["id"], tp_price=new_tp)
+            logger.info(f"Scalper: ADJUST_TP → {new_tp:.6f}")
+
+    else:
+        logger.info(f"Scalper: {decision.upper()} — {reasoning[:80]}")
+
+    log_activity(agent_id, f"SCALPER {decision} | {reasoning}", "info")
+    return True
+
+
 async def _trader_beat(agent_id: str) -> bool:
     """Jeden cykl heartbeat tradera — zbiera dane, pyta LLM, wykonuje akcję."""
     from database.db import log_activity, get_agent
@@ -271,9 +498,10 @@ async def _trader_beat(agent_id: str) -> bool:
     # Buduj kontekst
     corrections_txt = ""
     if data["corrections"]:
-        corrections_txt = "\nSUPERVISOR CORRECTIONS (apply immediately):\n"
+        corrections_txt = "\nSUPERVISOR CORRECTIONS (apply immediately — these override your defaults):\n"
         for c in data["corrections"]:
-            corrections_txt += f"  - [{c['type']}] {c.get('reasoning','')}\n"
+            instruction = c.get("new_value") or c.get("reasoning") or ""
+            corrections_txt += f"  - {instruction[:300]}\n"
 
     if not open_trades and data["agent"].get("notes") == "pending_pause":
         from database.db import update_agent
@@ -440,8 +668,16 @@ If similar setups previously failed, lower confidence or skip.
 Select ONE to enter, or skip if nothing fits.
 
 POSITION RULES:
-- You decide leverage: x1-x50. Use x1-x3 for weak/unclear setups, x5-x15 for solid setups,
-  x20+ only for very high conviction with tight SL. Match leverage to certainty.
+- Position size (size_pct = fraction of budget):
+    confidence 0.55–0.64 → size_pct 0.20–0.30  (20–30% of budget)
+    confidence 0.65–0.74 → size_pct 0.30–0.50  (30–50% of budget)
+    confidence 0.75–0.84 → size_pct 0.50–0.70  (50–70% of budget)
+    confidence >= 0.85   → size_pct 0.70–1.00  (70–100% of budget)
+- Leverage — MUST follow this table, no exceptions:
+    confidence 0.55–0.64 → leverage x1–x3
+    confidence 0.65–0.74 → leverage x5–x10
+    confidence 0.75–0.84 → leverage x10–x20
+    confidence >= 0.85   → leverage x20–x50
 - You decide SL and TP: use ATR and pivot points (S1/R1) to place them at natural levels.
   Minimum SL: 0.3%, minimum TP: 0.5%
 - Only enter if confidence >= 55%.
@@ -452,12 +688,12 @@ Respond with valid JSON only:
   "reasoning": "max 60 words",
   "token": "BTC",
   "direction": "long" or "short",
-  "size_pct": 0.1,
-  "leverage": 3,
+  "size_pct": 0.50,
+  "leverage": 15,
   "sl_pct": 0.008,
   "tp_pct": 0.015,
   "strategy": "strategy_name",
-  "confidence": 0.70
+  "confidence": 0.78
 }}
 Do NOT enter if confidence < 0.55."""
 
@@ -471,7 +707,50 @@ Do NOT enter if confidence < 0.55."""
         logger.warning(f"Trader {agent_id}: LLM error — {e}")
         return False
 
-    decision = result.get("decision", "skip")
+    # Two-pass: jeśli Gemini chce wejść z niską pewnością → DeepSeek potwierdza lub odrzuca
+    if (not open_trades
+            and result.get("decision") == "enter"
+            and float(result.get("confidence", 1.0)) < 0.70):
+        conf_pct = int(float(result.get("confidence", 0)) * 100)
+        logger.debug(f"Trader {agent_id}: conf={conf_pct}% < 70% — DeepSeek second opinion")
+        deep_prompt = (
+            f"You are a senior trading analyst reviewing a junior trader's decision.\n\n"
+            f"PROPOSED TRADE:\n"
+            f"  Token: {result.get('token')} {(result.get('direction') or '').upper()}\n"
+            f"  Strategy: {result.get('strategy')} | Confidence: {conf_pct}%\n"
+            f"  Leverage: x{result.get('leverage',1)} | SL: {result.get('sl_pct',0):.1%} "
+            f"TP: {result.get('tp_pct',0):.1%}\n"
+            f"  Reasoning: {result.get('reasoning','')}\n\n"
+            f"MARKET DATA:\n{prompt[prompt.find('MARKET SIGNALS'):prompt.find('POSITION RULES')]}\n\n"
+            f"Does this trade make sense? Is the reasoning sound? "
+            f"Can you find a fatal flaw? Be critical.\n"
+            f"If the setup is genuinely valid, confirm it and suggest adjusted confidence. "
+            f"If it is weak or risky, reject it.\n\n"
+            f"Respond with valid JSON only:\n"
+            f'{{"verdict": "confirm" or "reject", "confidence": 0.72, "reasoning": "max 60 words"}}'
+        )
+        try:
+            deep_raw    = await asyncio.wait_for(
+                _deep_llm_call(deep_prompt, max_tokens=250), timeout=45
+            )
+            deep_result = _parse_json(deep_raw)
+            if deep_result.get("verdict") == "reject":
+                logger.info(
+                    f"Trader {agent_id}: DeepSeek ODRZUCIŁ {result.get('token')} — "
+                    f"{deep_result.get('reasoning','')[:80]}"
+                )
+                result["decision"]   = "skip"
+                result["reasoning"]  = f"[DeepSeek] {deep_result.get('reasoning','rejected')}"
+            else:
+                result["confidence"] = float(deep_result.get("confidence", result.get("confidence", 0.65)))
+                logger.debug(
+                    f"Trader {agent_id}: DeepSeek POTWIERDZIŁ {result.get('token')} "
+                    f"conf={int(result['confidence']*100)}%"
+                )
+        except Exception as _de:
+            logger.debug(f"Trader {agent_id}: DeepSeek second opinion error — {_de}")
+
+    decision  = result.get("decision", "skip")
     reasoning = result.get("reasoning", "")
 
     if decision == "enter" and not open_trades:
@@ -554,12 +833,13 @@ Do NOT enter if confidence < 0.55."""
                 }, "close")
             except Exception as _te:
                 logger.debug(f"Telegram trade alert error: {_te}")
-            asyncio.create_task(_write_journal_entry(agent_id, {
+            from database.db import push_journal_queue
+            push_journal_queue(agent_id, {
                 **dict(orig),
                 "pnl_usdt":   close_result.get("pnl_usdt", 0),
                 "exit_price": close_result.get("exit_price"),
                 "status":     "closed",
-            }, reasoning))
+            }, reasoning)
         else:
             logger.warning(f"Trader {agent_id}: close FAIL — {close_result.get('message')}")
 
@@ -730,67 +1010,118 @@ If no actions needed: {{"actions": [], "telegram": "", "summary": "All agents he
 
 async def _supervisor_full() -> bool:
     """Supervisor full review (co 24h): głęboka analiza + korekty + raport."""
-    from database.db import get_all_agents, get_agent_performance, get_agent_trades, get_connection, log_activity
+    from database.db import (
+        get_all_agents, get_agent_performance, get_agent_trades, get_connection,
+        log_activity, get_agent_strategy_breakdown, get_agent_token_breakdown,
+    )
 
     agents = get_all_agents()
     agents_data = []
     for a in agents:
-        perf   = get_agent_performance(a["id"])
-        recent = get_agent_trades(a["id"], limit=20)
-        strats = json.loads(a.get("strategies") or "[]")
+        perf            = get_agent_performance(a["id"])
+        recent          = get_agent_trades(a["id"], limit=10)
+        strats          = json.loads(a.get("strategies") or "[]")
+        strat_breakdown = get_agent_strategy_breakdown(a["id"])
+        token_breakdown = get_agent_token_breakdown(a["id"])
         agents_data.append({
-            "id":          a["id"],
-            "status":      a["status"],
-            "personality": a["personality"],
-            "budget":      a["budget_usdt"],
-            "pnl":         a["pnl_usdt"],
-            "strategies":  strats,
-            "perf":        perf,
-            "recent":      recent or [],
+            "id":             a["id"],
+            "status":         a["status"],
+            "personality":    a["personality"],
+            "budget":         a["budget_usdt"],
+            "pnl":            a["pnl_usdt"],
+            "strategies":     strats,
+            "perf":           perf,
+            "recent":         recent or [],
+            "strat_breakdown": strat_breakdown,
+            "token_breakdown": token_breakdown,
         })
 
     if not agents_data:
         logger.info("Supervisor full: brak agentów")
         return True
 
-    summary = json.dumps(
-        [{"id": d["id"], "status": d["status"], "pnl": d["pnl"],
-          "perf": d["perf"], "strategies": d["strategies"]}
-         for d in agents_data],
-        indent=2
-    )
+    # Buduj czytelny blok per agent — nie surowy JSON żeby LLM lepiej rozumiał
+    agents_blocks = []
+    for d in agents_data:
+        recent_lines = ""
+        for t in d["recent"]:
+            if t.get("status") == "closed":
+                pnl_s = f"{t.get('pnl_usdt', 0):+.4f}$"
+                recent_lines += (
+                    f"    {t.get('token','?')} {(t.get('direction','?')).upper()} "
+                    f"{t.get('strategy_used','?')} {pnl_s} "
+                    f"conf={int((t.get('confidence') or 0)*100)}%\n"
+                )
 
-    prompt = f"""You are the Supervisor. Perform FULL 24h review of all trading agents.
+        strat_lines = ""
+        for s in d["strat_breakdown"]:
+            strat_lines += (
+                f"    {s['strategy_used']}: WR={s['win_rate']:.0f}% "
+                f"trades={s['total']} avg={s['avg_pnl']:+.4f}$\n"
+            )
 
-AGENTS DATA:
-{summary}
+        token_lines = ""
+        for t in d["token_breakdown"]:
+            token_lines += (
+                f"    {t['token']}: WR={t['win_rate']:.0f}% "
+                f"trades={t['total']} avg={t['avg_pnl']:+.4f}$\n"
+            )
 
-Your tasks:
-1. Identify underperformers (WR < 40% with >= 10 trades) — suggest strategy_change correction
-2. Identify outperformers (WR > 60%) — suggest budget increase
-3. Write corrections for agents that need adjustment
-4. Generate daily Telegram report
+        perf = d["perf"]
+        agents_blocks.append(
+            f"=== {d['id']} ({d['status']}, {d['personality']}) ===\n"
+            f"  Budget: ${d['budget']:.2f} | PnL: ${d['pnl']:+.2f} | "
+            f"WR: {perf.get('win_rate',0):.0f}% | Trades: {perf.get('trades',0)}\n"
+            f"  Strategies assigned: {', '.join(d['strategies']) or 'none'}\n"
+            f"  Strategy breakdown (min 3 trades):\n{strat_lines or '    (insufficient data)\n'}"
+            f"  Token breakdown (min 3 trades):\n{token_lines or '    (insufficient data)\n'}"
+            f"  Recent closed trades:\n{recent_lines or '    (none)\n'}"
+        )
+
+    agents_summary = "\n".join(agents_blocks)
+
+    prompt = f"""You are the Supervisor of a fleet of AI trading agents. Perform FULL 24h review.
+
+AGENT PERFORMANCE DATA:
+{agents_summary}
+
+YOUR TASKS:
+1. For each agent with >= 5 closed trades: analyse which strategies and tokens work best FOR THAT AGENT specifically.
+2. Write a targeted, personalised correction for agents that need focus adjustment.
+   - Good correction: "Your ema_cross on BTC/SOL has 78% WR — prioritise these setups. Avoid pivot_mr (25% WR, 8 trades — not working for you)."
+   - Bad correction: "consider adjusting risk" (too generic — do not write this)
+3. Agents with WR > 60% and >= 10 trades: suggest budget increase (+$5 to +$20)
+4. Agents with 5+ consecutive losses or WR < 30% (>= 10 trades): suggest pause
+5. Generate a daily Telegram report (plain text, no HTML, max 5 lines)
+
+RULES:
+- Only write corrections where you have real data to back them up
+- Corrections must be specific: name the exact strategy or token
+- If an agent has < 5 closed trades, write correction only if there is a clear problem pattern
+- Corrections are read by the agent at next heartbeat and influence its next trade decision
 
 Respond with valid JSON only:
 {{
   "corrections": [
     {{
       "agent_id": "trader_XX",
-      "type": "strategy_change",
-      "new_value": "description of change",
-      "reasoning": "why this change"
+      "type": "strategy_focus",
+      "new_value": "Specific actionable instruction with strategy/token names and their WR",
+      "reasoning": "Data-backed explanation: strategy X has Y% WR over Z trades"
     }}
   ],
   "budget_changes": [
     {{
       "agent_id": "trader_XX",
-      "delta_usdt": 50,
-      "reasoning": "outperformer reward"
+      "delta_usdt": 10,
+      "reasoning": "WR X% over Y trades — outperformer reward"
     }}
   ],
-  "telegram_report": "Daily report: system PnL $X, best agent: ..., issues: ...",
+  "pause_agents": ["trader_XX"],
+  "telegram_report": "Daily report: ...",
   "summary": "one sentence"
-}}"""
+}}
+If nothing to correct: {{"corrections": [], "budget_changes": [], "pause_agents": [], "telegram_report": "...", "summary": "All agents reviewed, no major issues"}}"""
 
     try:
         raw    = await asyncio.wait_for(_deep_llm_call(prompt, max_tokens=1500), timeout=SUPERVISOR_LLM_TIMEOUT * 2)
@@ -804,10 +1135,29 @@ Respond with valid JSON only:
         for c in result.get("corrections", []):
             conn.execute(
                 "INSERT INTO corrections (agent_id, type, new_value, reasoning) VALUES (?,?,?,?)",
-                (c.get("agent_id"), c.get("type", "note"),
+                (c.get("agent_id"), c.get("type", "strategy_focus"),
                  c.get("new_value", ""), c.get("reasoning", "")),
             )
-            logger.info(f"Supervisor: korekta dla {c.get('agent_id')} — {c.get('type')}")
+            logger.info(
+                f"Supervisor: korekta dla {c.get('agent_id')} — "
+                f"{c.get('new_value','')[:80]}"
+            )
+
+    # Pauzy zalecone przez supervisora
+    from database.db import update_agent
+    for aid in result.get("pause_agents", []):
+        from database.db import get_connection as _gc2
+        with _gc2() as conn2:
+            has_open = conn2.execute(
+                "SELECT COUNT(*) FROM trades WHERE agent_id=? AND status='open'", (aid,)
+            ).fetchone()[0]
+        if has_open:
+            update_agent(aid, notes="pending_pause")
+            log_activity("supervisor", f"PAUSE_DEFERRED {aid} — pauza po zamknięciu pozycji", "warning")
+        else:
+            update_agent(aid, status="paused")
+            log_activity("supervisor", f"PAUSE {aid} — zalecone przez full review", "warning")
+            logger.warning(f"Supervisor: PAUSE {aid}")
 
     # Wyślij raport Telegram
     report = result.get("telegram_report", "")
@@ -903,17 +1253,25 @@ class OpenClawRunner:
                     await asyncio.sleep(30)
                     continue
 
-                success = await _trader_beat(agent_id)
+                if agent_id in SCALPER_AGENTS:
+                    success = await _scalper_beat(agent_id)
+                    interval = (
+                        SCALPER_POSITION_INTERVAL
+                        if self._has_open_position(agent_id)
+                        else SCALPER_SCAN_INTERVAL
+                    )
+                else:
+                    success = await _trader_beat(agent_id)
+                    interval = (
+                        TRADER_POSITION_INTERVAL
+                        if self._has_open_position(agent_id)
+                        else TRADER_SCAN_INTERVAL
+                    )
+
                 if success:
                     logger.info(f"OpenClaw heartbeat OK: {agent_id}")
                 else:
                     logger.warning(f"OpenClaw heartbeat FAIL: {agent_id}")
-
-                interval = (
-                    TRADER_POSITION_INTERVAL
-                    if self._has_open_position(agent_id)
-                    else TRADER_SCAN_INTERVAL
-                )
                 await asyncio.sleep(interval)
 
             except asyncio.CancelledError:
@@ -952,6 +1310,41 @@ class OpenClawRunner:
                 await asyncio.sleep(60)
 
         logger.info("OpenClaw: supervisor loop stop")
+
+    async def _journal_processor_loop(self):
+        """Przetwarza journal_queue: DeepSeek reflection + zapis do ChromaDB.
+        Restart-safe — wpisy w DB przeżywają restart procesu."""
+        from database.db import (
+            pop_journal_queue_batch, mark_journal_done,
+            mark_journal_failed, reset_processing_journal_entries,
+        )
+        reset_processing_journal_entries()
+        logger.info("OpenClaw: journal processor start")
+
+        while self.running:
+            try:
+                entries = pop_journal_queue_batch(limit=3)
+                for entry in entries:
+                    queue_id     = entry["id"]
+                    agent_id     = entry["agent_id"]
+                    try:
+                        trade        = json.loads(entry["trade_json"])
+                        close_reason = entry["close_reason"]
+                        await _write_journal_entry(agent_id, trade, close_reason)
+                        mark_journal_done(queue_id)
+                        logger.debug(f"Journal: queue_id={queue_id} agent={agent_id} zapisano")
+                    except Exception as e:
+                        mark_journal_failed(queue_id, str(e))
+                        logger.warning(f"Journal: queue_id={queue_id} błąd — {e}")
+
+                await asyncio.sleep(30 if entries else 60)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Journal processor error: {e}", exc_info=True)
+                await asyncio.sleep(60)
+
+        logger.info("OpenClaw: journal processor stop")
 
     async def _spawn_trader_tasks(self) -> list[asyncio.Task]:
         from database.db import get_all_agents
@@ -1015,8 +1408,11 @@ class OpenClawRunner:
         supervisor_task = asyncio.create_task(
             self._supervisor_loop(), name="oc_supervisor"
         )
+        journal_task = asyncio.create_task(
+            self._journal_processor_loop(), name="oc_journal"
+        )
         trader_tasks = await self._spawn_trader_tasks()
-        all_tasks    = [supervisor_task] + trader_tasks
+        all_tasks    = [supervisor_task, journal_task] + trader_tasks
 
         try:
             while self.running:

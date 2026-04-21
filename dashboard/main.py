@@ -190,8 +190,10 @@ def _build_snapshot() -> dict:
     # Logi
     logs = get_recent_logs(limit=100)
 
-    # Statystyki
-    total_pnl    = sum(float(a["pnl_usdt"] or 0) for a in agents)
+    # Statystyki — scalper ma oddzielny PnL
+    _SCALPER_IDS = {"scalper"}
+    total_pnl    = sum(float(a["pnl_usdt"] or 0) for a in agents if a["id"] not in _SCALPER_IDS)
+    scalper_pnl  = sum(float(a["pnl_usdt"] or 0) for a in agents if a["id"] in _SCALPER_IDS)
     active_count = sum(1 for a in agents if a["status"] == "active")
 
     # Market data (jeśli market_feed działa)
@@ -223,6 +225,7 @@ def _build_snapshot() -> dict:
         "type":           "snapshot",
         "mode":           settings.TRADING_MODE,
         "total_pnl":      round(total_pnl, 4),
+        "scalper_pnl":    round(scalper_pnl, 4),
         "active_agents":  active_count,
         "total_agents":   len(agents),
         "total_trades":   total_trades,

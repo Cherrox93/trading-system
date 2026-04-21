@@ -78,9 +78,22 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
     regime      TEXT                           -- 'trending'/'ranging'/'volatile'
 );
 
+-- Kolejka wpisów do dziennika (restart-resilient)
+CREATE TABLE IF NOT EXISTS journal_queue (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp    TEXT DEFAULT (datetime('now')),
+    agent_id     TEXT NOT NULL,
+    trade_json   TEXT NOT NULL,         -- JSON snapshot zamkniętego trade
+    close_reason TEXT NOT NULL,
+    status       TEXT DEFAULT 'pending', -- pending/processing/done/failed
+    attempts     INTEGER DEFAULT 0,
+    last_error   TEXT
+);
+
 -- Indeksy dla wydajności
 CREATE INDEX IF NOT EXISTS idx_trades_agent    ON trades(agent_id);
 CREATE INDEX IF NOT EXISTS idx_trades_status   ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_time     ON trades(timestamp);
 CREATE INDEX IF NOT EXISTS idx_log_source      ON activity_log(source);
 CREATE INDEX IF NOT EXISTS idx_log_time        ON activity_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_jq_status       ON journal_queue(status);

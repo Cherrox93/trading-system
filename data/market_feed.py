@@ -705,9 +705,10 @@ def write_snapshot():
             # Funding
             "funding_rate": fund["rate"],
 
-            # Tylko ostatnie 25 świec 1m (potrzebne przez signal_scanner do volume spike)
+            # Świece 1m (volume spike) + 5m (scalper)
             "candles": {
                 "1m": list(state.candles[symbol]["1m"])[-25:],
+                "5m": list(state.candles[symbol]["5m"])[-30:],
             },
 
             # Wskaźniki wyliczone lokalnie

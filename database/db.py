@@ -28,6 +28,18 @@ def init_db():
             "ALTER TABLE agents ADD COLUMN strategy_notes TEXT",
             "ALTER TABLE agents ADD COLUMN personal_notes TEXT",
             "ALTER TABLE trades ADD COLUMN leverage INTEGER DEFAULT 1",
+            (
+                "CREATE TABLE IF NOT EXISTS journal_queue ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "timestamp TEXT DEFAULT (datetime('now')), "
+                "agent_id TEXT NOT NULL, "
+                "trade_json TEXT NOT NULL, "
+                "close_reason TEXT NOT NULL, "
+                "status TEXT DEFAULT 'pending', "
+                "attempts INTEGER DEFAULT 0, "
+                "last_error TEXT)"
+            ),
+            "CREATE INDEX IF NOT EXISTS idx_jq_status ON journal_queue(status)",
         ]:
             try:
                 conn.execute(migration)
@@ -249,10 +261,7 @@ def get_personal_notes(agent_id: str, limit: int = 10) -> list[str]:
 
 
 def get_strategy_performance() -> list[dict]:
-    """
-    Zwraca WR i liczbę użyć dla każdej strategy_used
-    z tabeli trades (tylko zamknięte).
-    """
+    """Zwraca WR i liczbę użyć dla każdej strategy_used (globalnie)."""
     with get_connection() as conn:
         rows = conn.execute("""
             SELECT
@@ -272,6 +281,100 @@ def get_strategy_performance() -> list[dict]:
             ORDER BY win_rate DESC
         """).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_agent_strategy_breakdown(agent_id: str) -> list[dict]:
+    """Per-agent: WR i avg PnL dla każdej strategii (min. 3 trade'y)."""
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT
+                strategy_used,
+                COUNT(*) as total,
+                SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) as wins,
+                ROUND(AVG(pnl_usdt), 4) as avg_pnl,
+                ROUND(
+                    100.0 * SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END)
+                    / COUNT(*), 1
+                ) as win_rate
+            FROM trades
+            WHERE agent_id = ? AND status = 'closed' AND strategy_used IS NOT NULL
+            GROUP BY strategy_used
+            HAVING COUNT(*) >= 3
+            ORDER BY win_rate DESC
+        """, (agent_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_agent_token_breakdown(agent_id: str) -> list[dict]:
+    """Per-agent: WR i avg PnL dla każdego tokenu (min. 3 trade'y)."""
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT
+                token,
+                COUNT(*) as total,
+                SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) as wins,
+                ROUND(AVG(pnl_usdt), 4) as avg_pnl,
+                ROUND(
+                    100.0 * SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END)
+                    / COUNT(*), 1
+                ) as win_rate
+            FROM trades
+            WHERE agent_id = ? AND status = 'closed'
+            GROUP BY token
+            HAVING COUNT(*) >= 3
+            ORDER BY win_rate DESC
+        """, (agent_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Journal Queue ─────────────────────────────────────────
+
+def push_journal_queue(agent_id: str, trade: dict, close_reason: str) -> int:
+    """Dodaj trade do kolejki przetwarzania dziennika (restart-safe)."""
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO journal_queue (agent_id, trade_json, close_reason) VALUES (?, ?, ?)",
+            (agent_id, json.dumps(trade), close_reason[:500]),
+        )
+        return cur.lastrowid
+
+
+def pop_journal_queue_batch(limit: int = 5) -> list[dict]:
+    """Pobierz pending wpisy i oznacz jako 'processing'."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM journal_queue WHERE status='pending' ORDER BY timestamp ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        if rows:
+            ids = ",".join(str(r["id"]) for r in rows)
+            conn.execute(
+                f"UPDATE journal_queue SET status='processing', attempts=attempts+1 WHERE id IN ({ids})"
+            )
+        return [dict(r) for r in rows]
+
+
+def mark_journal_done(queue_id: int):
+    with get_connection() as conn:
+        conn.execute("UPDATE journal_queue SET status='done' WHERE id=?", (queue_id,))
+
+
+def mark_journal_failed(queue_id: int, error: str):
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE journal_queue SET status='failed', last_error=? WHERE id=?",
+            (error[:300], queue_id),
+        )
+
+
+def reset_processing_journal_entries():
+    """Na starcie: przywróć 'processing' → 'pending' (przerwane przez restart)."""
+    with get_connection() as conn:
+        n = conn.execute(
+            "UPDATE journal_queue SET status='pending' WHERE status='processing'"
+        ).rowcount
+    if n:
+        logger.info(f"Journal queue: przywrócono {n} przerwaną analizę po restarcie")
 
 
 def get_recent_logs(limit: int = 100, source: str = None) -> list[dict]:

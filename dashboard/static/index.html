@@ -532,6 +532,10 @@ select{
       <span class="stat-l">PnL</span>
       <span class="stat-v" id="h-pnl">—</span>
     </div>
+    <div class="stat" style="border-left:1px solid var(--border);padding-left:14px">
+      <span class="stat-l" style="color:#a78bfa">Scalper PnL</span>
+      <span class="stat-v" id="h-scalper-pnl">—</span>
+    </div>
     <div class="stat">
       <span class="stat-l">Agents</span>
       <span class="stat-v" id="h-agents">—</span>
@@ -565,10 +569,15 @@ select{
     <div class="ticker" id="ticker"></div>
   </div>
 
-  <div class="grid grid-3" style="margin-bottom:20px">
+  <div class="grid grid-4" style="margin-bottom:20px">
     <div class="card" id="pnl-card">
       <div class="card-label">Total PnL</div>
       <div class="card-value" id="ov-pnl">—</div>
+      <div class="card-sub">USDT</div>
+    </div>
+    <div class="card" id="scalper-pnl-card">
+      <div class="card-label" style="color:#a78bfa">Scalper PnL</div>
+      <div class="card-value" id="ov-scalper-pnl">—</div>
       <div class="card-sub">USDT</div>
     </div>
     <div class="card">
@@ -818,6 +827,10 @@ function updHeader(d) {
   const el  = document.getElementById('h-pnl');
   el.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + ' USDT';
   el.className   = 'stat-v ' + (pnl >= 0 ? 'pos' : 'neg');
+  const spnl = d.scalper_pnl || 0;
+  const sel  = document.getElementById('h-scalper-pnl');
+  sel.textContent = (spnl >= 0 ? '+' : '') + spnl.toFixed(4) + ' USDT';
+  sel.className   = 'stat-v ' + (spnl >= 0 ? 'pos' : 'neg');
   document.getElementById('h-agents').textContent = `${d.active_agents}/${d.total_agents}`;
   document.getElementById('h-trades').textContent = d.total_trades || 0;
   document.getElementById('h-pos').textContent    = d.open_positions || 0;
@@ -854,6 +867,11 @@ function updOverview(d) {
   el.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
   el.className   = 'card-value' + (pnl < 0 ? ' neg' : pnl > 0 ? ' pos' : '');
   document.getElementById('pnl-card').className = 'card ' + (pnl > 0 ? 'glow-green' : pnl < 0 ? 'glow-red' : '');
+  const spnl = d.scalper_pnl || 0;
+  const sel  = document.getElementById('ov-scalper-pnl');
+  sel.textContent = (spnl >= 0 ? '+' : '') + spnl.toFixed(4);
+  sel.className   = 'card-value' + (spnl < 0 ? ' neg' : spnl > 0 ? ' pos' : '');
+  document.getElementById('scalper-pnl-card').className = 'card ' + (spnl > 0 ? 'glow-green' : spnl < 0 ? 'glow-red' : '');
   document.getElementById('ov-agents').textContent     = d.active_agents || 0;
   document.getElementById('ov-agents-sub').textContent = `of ${d.total_agents || 0} total`;
   document.getElementById('ov-pos').textContent        = d.open_positions || 0;
